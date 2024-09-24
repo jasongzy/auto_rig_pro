@@ -1,0 +1,1 @@
+Assets files (presets files in .blend format and images) contained in Auto-Rig Pro are released under the terms of a Royalty Free license: a one-time fee is paid when purchasing the addon, for the right to use the content without having to pay any additional royalties or fees for each use. The asset files cannot be freely redistributed and sold.

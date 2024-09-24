@@ -1,0 +1,52 @@
+[3.70.36]
+
+New/improved:
+Version: 4.1: Armature collections API updated
+Version: 4.1: Since message box operators now include a "Cancel" button, use the direct popup message function instead, when "OK"/"Cancel" button are superfluous
+Version: 4.1: Ported the whole ARP FBX exporter to the latest Blender's FBX exporter, since mesh normals are exported with new settings in 4.1. To maintain backward-compatibility, the old version of the ARP FBX exporter is run on older Blender versions
+Version: 4.1: Added an "internal" collection, as parent of the mch_ internal collections and body color groups. Collections are sorted when Match to Rig.
+Interface: New help buttons that link to the documentation in the rig, smart, remap, export menus. Can be disabled from the addon preferences.
+Rig: Spline IK: New Twist target setting in option. Useful when rigging long necks with Spline IK limbs. A target bone must be defined to evaluate the twist rotation from.
+Rig: Spline IK: New "Parent External Bone" setting, in order to define what bone an external limb must be parented to: the deforming tip bone, or the control tip bone. For example, if the neck ref bone is parented to the tip ref bone of the Spline IK limb, it is recommended to set it to "Tip Deform" for a correct behavior, so that the neck bone remains attached to the actual deforming spline bone.
+Rig: Facial: New "Unlock Jaw Y Loc" setting, to allow jaw translation along the Y axis
+Rig: The Import and Export features can now handle Limb Options. Useful when needing to backup rig data.
+Rig: New mirror feature for the "Add Hand Fist" tool 
+Rig: New mirror feature for the "Add Blink Pose" tool
+Rig Tools: Head Lock now supports Bake
+Rig Tools: Arm Lock now supports Snap and Bake
+Rig Tools: Thigh Lock now supports Snap and Bake
+Rig Tools: Pole Parent now supports Bake
+Rig Tools: Default frame start/end of bake operators are now set to the scene or preview range
+Rig Tools: (Performance) The bake operators do not work with Auto-Key anymore. It is now turned off internally for performance reasons, such as the Motion Paths evaluation
+Skin: The "Smooth Twist Weights" setting now supports multiple twist bones, was limited to 1 twist bone before
+Remap: New Mocopi preset
+Export: Renaming bones from file now supports Blender's internal text files too (thanks to Greisane for the patch)
+Export: GLTF: Custom properties located on actions and pose bones are now exported
+Export: FBX: Custom properties located on pose bones are now exported
+Export: Preserve hierarchy when objects deformed by armature modifiers are parented to other deformed objects
+Export: UI: Removed Auto-Rig Pro specific params from the UI when exporting a custom armature (twist export, c_traj export...)
+Smart: The elbow position is now set more accurately, supporting non-straight arms
+Smart: New settings to define the spine curvature: "Straight" for straight spine, "Model Fit" to fit the actual model shape, "Arched (UE)" to fit the UE5 Mannequin spine.
+Smart: When setting the spine count higher than 3, the spine curvature is now maintained in "Model Fit" and "Arched" mode. Spine bones were always straight before.
+Smart: New settings to define the clavicles alignment, to better fit the UE Mannequin.
+Smart: UI: Collapsable menus (Blender 4.1+ only)
+
+Fixed:
+Rig Tools: API: The operator arp.convert_rot_mode() had wrong default values
+Rig Tools: Motion Trails evaluation + Animated Rig Layers was failing to update. A picky condition has been added to update the collection visibility only when necessary
+Rig: "Show IK Directions" was not drawing the line when selecting only the head or tail of a bone
+Export: FBX: Error with the new "argument mesh_names_data" when using Blender 4.0
+Export: Incorrect mannequin bones axes in some cases
+Export: Error when exporting linked actions in Blende 4.1
+Export: GLTF: Missing arm and leg bones when exporting as a humanoid with Twist Secondaries
+Export: custom_collection type error in sort_armature_collections()
+Export: Invalid mesh data export when Triangulate was enabled, due to mesh renaming issues
+Export: Exclude objects from export, that are located in external view layers, since these are unaccessible data.
+Remap: Incorrect retargetting if arms or legs bones were set with the "Lock-Free" option
+Rig: Re-initialized bones color groups from armature presets, as a workaround for the invisible stick bones
+Rig: Limb Export: Pose bone properties were not exported for all bones
+Rig: Sorting alphabetically the internal collections under Blender 4.1+ was leading to error in case custom collections were added by users
+Rig: "Apply Pose as Rest Pose" was missing support for Spline IK limbs
+Rig: Bones collection displayed as "exclusive" (Blender 4.1+, star icon) was interfering when cliking Edit Reference Bones, or other buttons. Exclusive display is now disabled automatically
+Rig: The Mirror Blink Pose function was missing the eyelid tweak controller
+Smart: Visibility states of hidden objects was not restored properly after the detection
