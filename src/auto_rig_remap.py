@@ -1296,6 +1296,15 @@ class ARP_OT_retarget(Operator):
         
 
     def execute(self, context):
+        scn = context.scene
+        self.show_freeze_warn = scn.arp_show_freeze_warn
+        self.force_source_freeze = 'NO'
+        check_retargetting_inputs(self)
+        check_armature_init_transforms(self)
+        check_bones_names_length(self)
+        self.NLA_tweak_state = nla_exit_tweak()
+        self.NLA_muted = nla_mute(get_object(scn.target_rig))
+
         use_global_undo = context.preferences.edit.use_global_undo
         context.preferences.edit.use_global_undo = False
         
