@@ -4,6 +4,38 @@ from mathutils import *
 from math import *
 
 
+def restore_actions_cns_lib(dict):
+    for pbname in dict:
+        cns_dict = dict[pbname]
+        pb = get_pose_bone(pbname)
+        for cns_name in cns_dict:
+            lib_action_name = cns_dict[cns_name]
+            lib_action = None
+            for _act in bpy.data.actions:
+                if _act.name == lib_action_name and _act.library:
+                    lib_action = _act
+                    break
+            
+            if lib_action:
+                cns = pb.constraints.get(cns_name)
+                cns.action = lib_action
+                #print("Replace with lib action:", pbname, lib_action_name)
+
+
+def save_actions_cns_lib():
+    actions_cns_lib_dict = {}
+    for pb in bpy.context.active_object.pose.bones:
+        cnss = {}
+        for cns in pb.constraints:
+            if cns.type == "ACTION":
+                if cns.action and cns.action.library:
+                    cnss[cns.name] = cns.action.name
+        actions_cns_lib_dict[pb.name] = cnss
+        
+    return actions_cns_lib_dict
+    
+
+
 def enable_constraint(cns, value):
     if bpy.app.version >= (3,0,0):
         cns.enabled = value

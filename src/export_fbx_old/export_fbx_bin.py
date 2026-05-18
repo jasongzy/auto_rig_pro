@@ -2320,6 +2320,7 @@ def fbx_animations_do(scene_data, ref_id, f_start, f_end, start_zero, objects=No
     depsgraph = scene_data.depsgraph
     force_keying = scene_data.settings.bake_anim_use_all_bones
     force_sek = scene_data.settings.bake_anim_force_startend_keying
+    force_sek_sk = scene_data.settings.bake_anim_force_startend_keying_sk# Auto Rig Pro Implant
     gscale = scene_data.settings.global_scale                                         
 
     if objects is not None:
@@ -2359,10 +2360,22 @@ def fbx_animations_do(scene_data, ref_id, f_start, f_end, start_zero, objects=No
         if not me.shape_keys.use_relative:
             continue
         for shape, (channel_key, geom_key, _shape_verts_co, _shape_verts_idx) in shapes.items():
-            acnode = AnimationCurveNodeWrapper(channel_key, 'SHAPE_KEY', force_key, force_sek, (0.0,))
-            # Sooooo happy to have to twist again like a mad snake... Yes, we need to write those curves twice. :/
-            acnode.add_group(me_key, shape.name, shape.name, (shape.name,))
-            animdata_shapes[channel_key] = (acnode, me, shape)
+            # Auto-Rig Pro Implant
+            # Only export animation for driven or keyframed shapes
+            dr = me.shape_keys.animation_data.drivers.find(f'key_blocks["{shape.name}"].value')
+            is_driven = dr != None
+            
+            is_animated = False
+            act_sk = me.shape_keys.animation_data.action
+            if act_sk:
+                fc = act_sk.fcurves.find(f'key_blocks["{shape.name}"].value')
+                is_animated = fc != None
+            
+            if (is_animated or is_driven) or force_sek_sk:# Auto-Rig Pro Implant
+                acnode = AnimationCurveNodeWrapper(channel_key, 'SHAPE_KEY', force_key, force_sek, (0.0,))
+                # Sooooo happy to have to twist again like a mad snake... Yes, we need to write those curves twice. :/
+                acnode.add_group(me_key, shape.name, shape.name, (shape.name,))
+                animdata_shapes[channel_key] = (acnode, me, shape)
 
     animdata_cameras = {}
     for cam_obj, cam_key in scene_data.data_cameras.items():
@@ -2617,7 +2630,7 @@ def fbx_animations(scene_data):
                     if scene_data.settings.export_action_only == act.name:
                         save_action = True
                 else:
-                    save_action = is_action_exportable(act)
+                    save_action = is_action_baked(act)
                 
                 if save_action:# End Auto-Rig Pro implant
                 
@@ -3523,6 +3536,7 @@ def save_single(operator, scene, depsgraph, filepath="",
                 bake_anim_step=1.0,
                 bake_anim_simplify_factor=1.0,
                 bake_anim_force_startend_keying=True,
+                bake_anim_force_startend_keying_sk=False,
                 add_leaf_bones=False,
                 primary_bone_axis='Y',
                 secondary_bone_axis='X',
@@ -3609,7 +3623,7 @@ def save_single(operator, scene, depsgraph, filepath="",
         bake_anim, bake_anim_use_all_bones, bake_anim_use_nla_strips, bake_anim_use_all_actions,
         bake_anim_step, bake_anim_simplify_factor, bake_anim_force_startend_keying,
         False, media_settings, use_custom_props, colors_type, prioritize_active_color,
-        shape_keys_baked_data_dict, export_action_only#Auto-Rig Pro implant
+        shape_keys_baked_data_dict, export_action_only, bake_anim_force_startend_keying_sk#Auto-Rig Pro implant
     )
 
     import bpy_extras.io_utils

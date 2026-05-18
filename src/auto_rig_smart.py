@@ -1,4 +1,5 @@
-import bpy, bmesh, math, bpy_extras, blf, time, os
+import bpy, bmesh, math, bpy_extras, blf, time, os, json
+import platform
 from bpy_extras import *
 from math import *
 import mathutils
@@ -7,17 +8,18 @@ from mathutils.bvhtree import BVHTree
 from . import auto_rig_datas as ard
 from . import auto_rig, utils
 from .utils import *
-from bpy.types import Operator
+from bpy.types import (Operator, Menu)
 from bpy.props import IntProperty, FloatProperty, EnumProperty, StringProperty, BoolProperty, FloatVectorProperty, CollectionProperty
 from operator import itemgetter
-
 import gpu
 from gpu_extras.batch import *
 import gpu_extras
-
 from bpy.app.handlers import persistent
-
-
+import subprocess, threading
+import random
+from itertools import combinations
+        
+        
 #print ("\n Starting Auto-Rig Pro: Smart... \n")
 
 # Global vars
@@ -48,6 +50,14 @@ class ARP_OT_facial_setup(Operator):
 
         try:
             _facial_setup()
+            
+            update_smart_ears(self, context)
+            update_smart_eyebrows(self, context)
+            update_smart_eyes(self, context)
+            update_smart_nose(self, context)
+            update_smart_mouth(self, context)
+            update_smart_cheeks(self, context)
+            update_smart_chin(self, context)
 
         finally:
             context.preferences.edit.use_global_undo = use_global_undo
@@ -185,48 +195,38 @@ class ARP_OT_get_selected_objects(Operator):
 
         # check units scale
         unit_system = scn.unit_settings
-        message = "Scene unit scale not set to 1.0! May give inaccurate results"
+        message = 'Scene unit scale not set to 1.0! May give inaccurate results'
         if unit_system.system != 'None':
             if round(unit_system.scale_length, 3) != 1.0:
                 self.report({"WARNING"},message.upper())
 
         
-        # check meshes type
-        selection = [i for i in context.selected_objects]
-
-        for obj in selection:
-            if obj.type != 'MESH':
-                self.report({'ERROR'}, "Select meshes only")
-                return{'FINISHED'}
-                
+        # get only mesh objects
+        selected_objs = [i for i in context.selected_objects if i.type == 'MESH']        
+      
         # store current visibility states of all objects
         for obj in bpy.data.objects:
             obj['arp_smart_viz_state'] = [obj.hide_get(), obj.hide_viewport]
-
-        # add a 'arp_body_mesh' tag to the objects
-        for obj in selection:
-            obj['arp_body_mesh'] = 1
-
-        obj_scene_list = [i.name for i in bpy.data.objects]
         
-        # duplicate as copy
-        duplicate_object()
         
-        #   2.8 bug... objs get hidden after duplication :(
-        for obj in bpy.data.objects:
-            if obj.name not in obj_scene_list:
-                unhide_object(obj)
-                set_active_object(obj.name)
+        bpy.ops.object.select_all(action='DESELECT')
+
+        
+        # duplicate  
+        for ob in selected_objs:
+            ob['arp_body_mesh'] = 1# add a 'arp_body_mesh' tag to the objects
+            obj_dupli = duplicate_object(method='data', obj=ob)
+            set_active_object(obj_dupli.name)
                 
         # remove shape keys if any
         for obj in bpy.context.selected_objects:
             if obj.data.shape_keys:
                 sk = obj.data.shape_keys.key_blocks
                 # create new shape from mix
-                new_sk = obj.shape_key_add(name="FINALMESH", from_mix=True)
+                new_sk = obj.shape_key_add(name='FINALMESH', from_mix=True)
                 # delete other shapes
                 for kb in sk:
-                    if kb.name != "FINALMESH":
+                    if kb.name != 'FINALMESH':
                         obj.shape_key_remove(kb)
                 # delete new shape last to preserve the shape
                 obj.shape_key_remove(new_sk)
@@ -244,11 +244,11 @@ class ARP_OT_get_selected_objects(Operator):
         bpy.ops.object.join()
         
         # rename
-        context.active_object.name = "body_temp"
+        context.active_object.name = 'body_temp'
         body_temp = get_object(context.active_object.name)
         
         # set euler rotations
-        context.active_object.rotation_mode = "XYZ"
+        context.active_object.rotation_mode = 'XYZ'
     
         # remove prop on the copy, must be only the original meshes
         del context.active_object['arp_body_mesh']
@@ -280,10 +280,10 @@ class ARP_OT_get_selected_objects(Operator):
                         obj['arp_smart_hidden'] = True# tag it
 
         # hide from selection
-        for obj in selection:
+        for obj in selected_objs:
             if obj.hide_select == False:
                 obj.hide_select = True
-                obj["arp_smart_selection_hidden"] = True
+                obj['arp_smart_selection_hidden'] = True
        
 
         use_global_undo = context.preferences.edit.use_global_undo
@@ -295,14 +295,38 @@ class ARP_OT_get_selected_objects(Operator):
         finally:
             context.preferences.edit.use_global_undo = use_global_undo
 
-        return {'FINISHED'}     
+        return {'FINISHED'}  
+
+
+def AI_files_fingers_checked():
+    if not os.path.exists(os.path.join(get_AI_path(root_dir=True), 'info.dat')):
+        return False
+        
+    for model_name in ['fingers_model.pth', 'fingers4_model.pth']:
+        if not os.path.exists(os.path.join(get_AI_path(), model_name)):
+            return False
+    return True  
+    
+    
+def AI_files_check_version(required_version):
+    fp_info = os.path.join(get_AI_path(root_dir=True), 'info.dat')
+    if not os.path.exists(fp_info):
+        return False
+        
+    with open(fp_info, "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+            if first_line.startswith("version="):
+                current_version = float(first_line.split("=", 1)[1].strip())
+                print('current version', current_version, 'required', required_version)
+                return current_version >= required_version
+    return False
 
 
 class ARP_OT_go_detect(Operator):
     """Start the automatic detection"""
 
-    bl_idname = "id.go_detect"
-    bl_label = ""
+    bl_idname = 'id.go_detect'
+    bl_label = ''
     bl_options = {'UNDO'}
 
     arm_angle_x : FloatProperty(default=0.0)
@@ -322,6 +346,16 @@ class ARP_OT_go_detect(Operator):
     def invoke(self, context, event):
         scn = context.scene
         
+        if scn.arp_fingers_to_detect < 4 or not scn.arp_smart_depth:# AI only supports 5 or 4 fingers for now, and markers depth is required for the hand tip.
+            scn.arp_smart_fingers_engine = 'LEGACY'
+        
+        # check AI files integrity
+        if scn.arp_smart_fingers_engine == 'AI':
+            if not AI_files_fingers_checked():
+                err_mess = 'Fingers AI files are missing or not up to date\nPlease download the latest version or switch the fingers engine to "Voxel Centroids"'
+                self.report({'ERROR'}, err_mess)
+                return {'FINISHED'}
+                
         def trim_name_id(string):
             trimmed_string = string[3:]
             return trimmed_string
@@ -348,37 +382,39 @@ class ARP_OT_go_detect(Operator):
             
         if arp_facial_setup:
             unhide_object(arp_facial_setup)
-            # is the eyeball object set when facial rig is on?
-            found_eyes_object = True
-        
-            # check first eyeball
-            eyeball1 = get_object(scn.arp_eyeball_name)
-            if eyeball1 == None:
-                found_eyes_object = False
-                trimmed_name = trim_name_id(scn.arp_eyeball_name)
-                obj_trimmed = get_object(trimmed_name)# may be not found because of the 3 spaces for ID state description, try to trim it
-                if obj_trimmed:
-                    found_eyes_object = True
-                    scn["arp_eyeball_name"] = trimmed_name
-
-            # check second eyeball
-            if scn.arp_eyeball_type == "SEPARATE" and found_eyes_object:
-                eyeball2 = get_object(scn.arp_eyeball_name_right)
-                if eyeball2 == None:
+            
+            if scn.arp_smart_eyes:
+                # valid eyeball object?
+                found_eyes_object = True
+            
+                # check first eyeball
+                eyeball1 = get_object(scn.arp_eyeball_name)
+                if eyeball1 == None:
                     found_eyes_object = False
-                    trimmed_name = trim_name_id(scn.arp_eyeball_name_right)
+                    trimmed_name = trim_name_id(scn.arp_eyeball_name)
                     obj_trimmed = get_object(trimmed_name)# may be not found because of the 3 spaces for ID state description, try to trim it
                     if obj_trimmed:
                         found_eyes_object = True
-                        scn["arp_eyeball_name_right"] = trimmed_name
+                        scn["arp_eyeball_name"] = trimmed_name
 
-            if not found_eyes_object:
-                mess = "Eyeball object(s) undefined or does not exist.\nMake sure the eyeball name is correct"
-                print(mess)
-                set_vis_body_tmp(temp_body, 'HIDE')
-                _facial_setup()
-                self.report({'ERROR'}, mess)
-                return {'FINISHED'}
+                # check second eyeball
+                if scn.arp_eyeball_type == "SEPARATE" and found_eyes_object:
+                    eyeball2 = get_object(scn.arp_eyeball_name_right)
+                    if eyeball2 == None:
+                        found_eyes_object = False
+                        trimmed_name = trim_name_id(scn.arp_eyeball_name_right)
+                        obj_trimmed = get_object(trimmed_name)# may be not found because of the 3 spaces for ID state description, try to trim it
+                        if obj_trimmed:
+                            found_eyes_object = True
+                            scn["arp_eyeball_name_right"] = trimmed_name
+
+                if not found_eyes_object:
+                    mess = "Eyeball object(s) undefined or does not exist.\nMake sure the eyeball name is correct"
+                    print(mess)
+                    set_vis_body_tmp(temp_body, 'HIDE')
+                    _facial_setup()
+                    self.report({'ERROR'}, mess)
+                    return {'FINISHED'}
                 
             # make sure all facial objects are accessible
             for prop_name in ["arp_eyeball_name", "arp_eyeball_name_right", "arp_tongue_name", "arp_teeth_name", "arp_teeth_lower_name"]:
@@ -425,7 +461,7 @@ class ARP_OT_go_detect(Operator):
                     if vert.index in mid_verts:
                         vert.co[0] = 0.0
 
-            if len(arp_facial_setup.modifiers) > 0:
+            if len(arp_facial_setup.modifiers):
                 arp_facial_setup.modifiers.remove(arp_facial_setup.modifiers[0])
 
             bpy.context.evaluated_depsgraph_get().update()
@@ -456,7 +492,7 @@ class ARP_OT_go_detect(Operator):
             self.overwritten_rig = ''
          
             if 'rigs_found' in scn.keys():# must be deleted/added to update
-                try:# bug reported, leads to an error in some case. Use Try-Except for now. Todo: investigate why
+                try:# bug reported, leads to an error in some case. Use Try-Except for now. Todo: investigate why!
                     del bpy.types.Scene.rigs_found
                 except:
                     pass
@@ -476,18 +512,25 @@ class ARP_OT_go_detect(Operator):
             bpy.types.Scene.rigs_found = EnumProperty(items=self.rigs_found_items)
             
             rigs_found_items = self.rigs_found_items
-            #print("rigs_found_items", rigs_found_items)
-            #print("scn.rigs_found", scn.rigs_found)
             
             if len(rigs_found_items):
-                if len(rigs_found_items) > 1:
-                    # print("Found rigs:",  scn.rigs_found)
+                if len(rigs_found_items) > 1:                  
                     # open dialog to choose the armature to overwrite
                     wm = context.window_manager
                     return wm.invoke_props_dialog(self, width=400)
                 else:
                     self.overwritten_rig = scn.rigs_found                  
         
+        
+        # if AI fingers not run yet, run it
+        if scn.arp_fingers_enable and scn.arp_smart_type != 'FACIAL':
+            if scn.arp_smart_fingers_engine == 'AI' and scn.arp_fingers_to_detect in [4, 5]:# only 4-5 are supported by AI for now
+                if get_object('thumb1_loc') == None:
+                    print("Fingers AI not yet run, run it...")
+                    bpy.ops.arp.guess_fingers()
+                    
+                    if get_object('thumb1_loc') == None:# detection failed, fallback to no fingers
+                        scn.arp_fingers_enable = False
         
         self.execute(context)
 
@@ -668,8 +711,13 @@ class ARP_OT_go_detect(Operator):
                 #   auto merge
                 scn.tool_settings.use_mesh_automerge = automerge_value
                 #   restore cursor position
-                scn.cursor.location = cursor_current_position            
+                scn.cursor.location = cursor_current_position   
 
+            # Fame the character decently
+            bpy.ops.armature.select_all(action='SELECT')
+            #bpy.ops.view3d.view_axis(type='FRONT')
+            bpy.ops.view3d.view_selected(use_all_regions=False)
+            bpy.ops.armature.select_all(action='DESELECT')
             
             # restore undo
             context.preferences.edit.use_global_undo = use_global_undo
@@ -681,66 +729,305 @@ class ARP_OT_go_detect(Operator):
         return {'FINISHED'}
 
 
-# main drawing class
+
+class ARP_OT_guess_markers(Operator):
+    """Guess markers with deep learning (symmetrical characters only for now)\nLonger to run the first time"""
+
+    bl_idname = "arp.guess_markers"
+    bl_label = "Guess Markers"
+    
+    symmetry: BoolProperty(default=True)
+    
+    inf_path = ''
+    dicts_front = []
+    dicts_side = []
+    dicts_top = []
+    larger_dim = 0.0
+    larger_dimy = 0.0
+    larger_dimtop = 0.0
+    margin = 1.05
+    midx = 0.0
+    midy = 0.0
+    midz = 0.0
+    front_samples_rot = []
+    side_samples_offset = []
+    top_samples_rot = []
+   
+    def execute(self, context):
+        scn = context.scene
+        self.front_samples_rot = []
+        self.side_samples_offset = []
+        self.top_samples_rot = []
+        self.dicts_front = []
+        self.dicts_side = []
+        self.dicts_top = []
+        self.inf_path = get_AI_path()
+        
+        required_version = 1.20
+        is_version_ok = AI_files_check_version(required_version)
+        if not is_version_ok:
+            err_mess = 'AI files are missing or not up to date\nPlease download the latest version: '+str(required_version)
+            self.report({'ERROR'}, err_mess)
+            return {'FINISHED'}
+        
+        # screenshot
+        _screenshot_char(self)
+        
+        #  run processes
+        cores_amount = os.cpu_count()
+        batches = {}
+        batch_idx = 1
+        thread_batch_idx = 1
+        
+        for viewpoint in ['front', 'side', 'top']:    
+            bin_path = os.path.join(self.inf_path, 'inference_'+viewpoint+'.exe')
+            if platform.system() in ['Darwin', 'Linux']:
+                bin_path = bin_path[:-4]#rem '.exe'
+            
+            thresh = None
+            if viewpoint == 'top':
+                thresh = '0.5'
+
+            images = ''
+            tot_samples = scn.arp_smart_AI_body_samples if viewpoint == 'front' else 1# multi samples with side keypoints does not seem to improve the result unfortunately
+            for i in range(1, tot_samples+1):
+                images += viewpoint+str(i)+'.jpg,'
+                    
+            thread = threading.Thread(target=run_process, args=(bin_path, images, thresh, None))
+            
+            if thread_batch_idx < cores_amount-1:# do not exceed the amount of cores
+                if not batch_idx in batches:
+                    batches[batch_idx] = []
+                threads = batches[batch_idx]
+                threads.append(thread)
+                batches[batch_idx] = threads
+                thread_batch_idx += 1                
+            else:# new batch
+                batch_idx += 1
+                thread_batch_idx = 1
+                batches[batch_idx] = [thread]
+                thread_batch_idx += 1                
+        
+        for batch_idx in batches:
+            print('Running batch:', batch_idx)
+            for thread in batches[batch_idx]:
+                thread.start()
+
+            # block until complete
+            for thread in batches[batch_idx]:
+                thread.join()
+     
+     
+        # build markers
+        _fetch_keypoints(self)
+        _set_markers_from_keypoints(self)
+        _screenshot_cleanup(self)
+        
+        if self.symmetry:
+            scn.arp_smart_sym = True
+            scn.arp_smart_depth = True
+            
+        # enable fingers AI
+        scn.arp_smart_fingers_engine = 'AI'
+
+        return {'FINISHED'}
+        
+        
+def get_AI_path(root_dir=False):
+    AI_path = get_prefs().ai_presets_path    
+    if not (AI_path.endswith("\\") or AI_path.endswith('/')):
+        AI_path += '/'
+    if root_dir:
+        return AI_path
+    else:
+        return os.path.join(AI_path, "inference")
+    
+        
+        
+class ARP_OT_guess_fingers(Operator):
+    """Guess fingers with deep learning.\nLonger to run the first time"""
+
+    bl_idname = "arp.guess_fingers"
+    bl_label = "Guess Fingers"   
+    
+    inf_path = ''
+    keypoints = {}
+    cams_data_l = []
+    cams_data_r = []
+    cam_ortho = 1.0
+    hand_idx = 1
+    success = True
+    
+    def execute(self, context):
+        scn = context.scene
+        if bpy.data.objects.get('hand_tip_loc') == None:
+            self.report({'ERROR'}, 'Hand Tip marker is missing.\nClick "Add Optional Markers" to add it')
+            return {'FINISHED'}            
+            
+        # init
+        self.cams_data_l = []
+        self.cams_data_r = []
+        self.keypoints = {}        
+      
+        
+        #  AI path       
+        self.inf_path = get_AI_path()
+        
+        # check files integrity
+        if not AI_files_fingers_checked():
+            err_mess = 'Fingers AI files are missing or not up to date\nPlease download the latest version or switch the fingers engine to "Voxel Centroids"'
+            self.report({'ERROR'}, err_mess)
+            return {'FINISHED'}
+        
+        sides = ['_l']
+        if not scn.arp_smart_sym:
+            sides.append('_r')
+            
+        for side in sides:
+            print("Screenshot fingers", side)
+            _screenshot_fingers(self, side)
+        
+        #  run process
+        bin_path_fingers = os.path.join(self.inf_path, 'inference_fingers.exe')
+        if platform.system() in ['Darwin', 'Linux']:
+            bin_path_fingers = bin_path_fingers[:-4]#rem '.exe'
+        
+        hand_images = ''        
+        for side in sides:
+            for i in range(1, self.hand_idx+1):
+                hand_images += f'hand{i}{side}.jpg,'  
+                
+        thread = threading.Thread(target=run_process, args=(bin_path_fingers, hand_images, str(scn.arp_smart_AI_thresh), str(scn.arp_fingers_to_detect)))
+        thread.start()
+        thread.join()
+      
+        # build markers
+        for side in sides:
+            _fetch_fingers_keypoints(self, side)
+            _set_markers_fingers_from_keypoints(self, side)
+        
+        _screenshot_cleanup(self)
+        
+        if self.success == False:# failed
+            auto_rig.display_popup_message('AI fingers detection failed, likely caused by entangled fingers (curled, fist)\nTry increasing AI Samples, or decreasing Error Threshold, or use Voxel Centroid', header='Error', icon_type='ERROR')
+            set_active_object('root_loc')
+            
+        return {'FINISHED'}
+        
+        
+class ARP_OT_guess_facial(Operator):
+    """Guess facial markers with deep learning.\nStill experimental, works best with standard facial design, may not always output accurate results"""
+
+    bl_idname = "arp.guess_facial"
+    bl_label = "Guess Facial"   
+    
+    inf_path = ''
+    keypoints = []
+    cams_data = []
+    cam_ortho = 1.0
+    success = True
+    facial_samples_rot = []
+    
+    def execute(self, context):
+        scn = context.scene
+        if bpy.data.objects.get('chin_loc') == None:
+            self.report({'ERROR'}, 'Chin marker is missing')
+            return {'FINISHED'}            
+            
+        # init
+        self.facial_samples_rot = []
+        self.cams_data = []
+        self.keypoints = []
+        self.inf_path = get_AI_path()
+        
+        required_version = 1.17
+        is_version_ok = AI_files_check_version(required_version)
+        if not is_version_ok:
+            err_mess = 'AI files are missing or not up to date for facial markers\nPlease download the latest version: '+str(required_version)
+            self.report({'ERROR'}, err_mess)
+            return {'FINISHED'}
+            
+        if get_object('head_tip_loc') == None:
+            self.report({'ERROR'}, 'Add the head tip marker first')
+            return {'FINISHED'}
+            
+        print("Screenshot facial")
+        _screenshot_facial(self)
+        
+        #  run process
+        bin_path_facial = os.path.join(self.inf_path, 'inference_facial.exe')
+        if platform.system() in ['Darwin', 'Linux']:
+            bin_path_facial = bin_path_facial[:-4]#rem '.exe'
+        
+        facial_images = ''
+        for i in range(1, scn.arp_smart_AI_facial_samples+1):
+            facial_images += f'facial{i}.jpg,'
+                    
+        thread = threading.Thread(target=run_process, args=(bin_path_facial, facial_images, '0.3', None))
+        thread.start()
+        thread.join()
+        
+        # build markers
+        _fetch_facial_keypoints(self)
+        _set_markers_facial_from_keypoints(self)
+        
+        _screenshot_cleanup(self)
+        
+        if self.success == False:# failed
+            auto_rig.display_popup_message('AI facial detection failed. Place markers manually', header='Error', icon_type='ERROR')
+            set_active_object('root_loc')
+        
+        return {'FINISHED'}        
+        
+
 class ARP_OT_markers_fx(Operator):
     """Markers FX"""
 
-    bl_idname = "id.markers_fx"
-    bl_label = "markers_fx"
+    bl_idname = 'id.markers_fx'
+    bl_label = 'markers_fx'
 
     active : BoolProperty()
-    arp_marker_to_select : StringProperty(default="")
+    arp_marker_to_select : StringProperty(default='')
     img_name = 'arp_smart_circle'
     img_over_name = 'arp_smart_circle_over'
     img_blue_name = 'arp_smart_circle_blue'
     img_yellow_name = 'arp_smart_circle_yellow'
     img_red_name = 'arp_smart_circle_red'
-    shader_type = '2D_UNIFORM_COLOR'
-    shader_img_type = 'IMAGE_COLOR'
+    img_orange_name = 'arp_smart_circle_orange'
+    img_violet_name = 'arp_smart_circle_violet'
+    shader_type = 'UNIFORM_COLOR' if bpy.app.version >= (4,0,0) else '2D_UNIFORM_COLOR'
+    shader_img_type = '2D_IMAGE' if bpy.app.version < (3,4,0) else 'IMAGE_COLOR'
+    num_segments = 64
+    radius = 20
+    radius_dot = 2
+    radius_outline = 22
+    # color
+    circle_color = (0.0, 0.9, 0.5, 0.3)
+    border_color = (0.5, 0.9, 0.5, 0.6)
+    center_color = (1, 1, 1, 1)
+    blue_color =   (0.0, 0.7, 1.0, 0.8)
+    yellow_color = (1.0, 1.0, 0.0, 0.5)
+    orange_color = (1.0, 0.5, 0.0, 0.5)
+    red_color =    (1.0, 0.0, 0.0, 0.8)
+    violet_color = (0.5, 0.3, 0.5, 0.8)
     
-    def __init__(self):
-        # circles shape parameters
-        self.num_segments = 64
-        self.radius = 20
-        self.radius_dot = 2
-        self.radius_outline = self.radius + 2
-        # color
-        self.circle_color = (0.0, 0.9, 0.5, 0.3)
-        self.border_color = (0.5, 0.9, 0.5, 0.6)
-        self.center_color = (1, 1, 1, 1)
-        self.blue_color = (0.0, 0.7, 1.0, 0.8)
-        self.yellow_color = (1.0, 1.0, 0.0, 0.5)
-        self.red_color = (1.0, 0.0, 0.0, 0.5)
-        
-        # icon
-        self.img_circle = None
-        self.img_circle_over = None
-        self.img_circle_blue = None
-        self.img_circle_yellow = None
-        self.img_circle_red = None
-        self.tex = None
-        
-        # internal vars
-        #self.shader = None
-        #self.batch = None
-        #self.shader_outline = None
-        #self.batch_outline = None
-        #self.shader_center = None
-        #self.batch_center = None
-
-        self.region = None
-        self.region_3d = None
-        self.mouse_x = None
-        self.mouse_y = None
-        self.hotspot_selectable_marker = None
-        self.mouse_select = None
-        
-        if bpy.app.version >= (4,0,0):
-            self.shader_type = 'UNIFORM_COLOR'
-        if bpy.app.version < (3,4,0):
-            self.shader_img_type = '2D_IMAGE'
-            
-        
+    # icon
+    img_circle = None
+    img_circle_over = None
+    img_circle_blue = None
+    img_circle_yellow = None
+    img_circle_orange = None
+    img_circle_violet = None
+    img_circle_red = None
+    tex = None    
+  
+    region = None
+    region_3d = None
+    mouse_x = None
+    mouse_y = None
+    hotspot_selectable_marker = None    
+    mouse_select = None
+    
     
     def draw(self, context):
         if bpy.context.scene.arp_disable_smart_fx:
@@ -752,18 +1039,44 @@ class ARP_OT_markers_fx(Operator):
         if arp_markers:            
             self.hotspot_selectable_marker = None
             gpu.state.blend_set('ADDITIVE')
+            
             for obj in arp_markers.children:
                 object_loc_2d = bpy_extras.view3d_utils.location_3d_to_region_2d(self.region, self.region_3d, obj.matrix_world.translation, default=None)
 
                 # parent-child line connection
                 par_joint = None
                 par_object_loc_2d = None
-                if obj.name == 'chin_loc' or obj.name == ('root_loc') or obj.name.startswith('shoulder_loc'):
+                #   body
+                if obj.name in ['chin_loc', 'root_loc', 'head_tip_loc'] or obj.name.startswith('shoulder_loc'):
                     par_joint = get_object('neck_loc')              
                 elif obj.name.startswith('hand_loc'):
-                    par_joint = get_object(obj.name.replace('hand_loc', 'shoulder_loc'))
+                    if get_object('elbow_loc'):
+                        par_joint = get_object(obj.name.replace('hand_loc', 'elbow_loc'))
+                    else:
+                        par_joint = get_object(obj.name.replace('hand_loc', 'shoulder_loc'))
+                elif obj.name.startswith('elbow_loc'):
+                    par_joint = get_object(obj.name.replace('elbow_loc', 'shoulder_loc'))
+                elif obj.name.startswith("hand_tip_loc"):
+                    par_joint = get_object(obj.name.replace('hand_tip_loc', 'hand_loc'))
                 elif obj.name.startswith('foot_loc'):
+                    if get_object('knee_loc'):
+                        par_joint = get_object(obj.name.replace('foot_loc', 'knee_loc'))
+                    elif get_object('thigh_loc'):
+                        par_joint = get_object(obj.name.replace('foot_loc', 'thigh_loc'))
+                    else:
+                        par_joint = get_object('root_loc')
+                elif obj.name.startswith('knee_loc'):
+                    par_joint =get_object(obj.name.replace('knee_loc', 'thigh_loc'))
+                elif obj.name.startswith('thigh_loc'):
                     par_joint = get_object('root_loc')
+                #   fingers
+                for fname in ['thumb', 'index', 'middle', 'ring', 'pinky']:
+                    for fi in range(1, 5):
+                        if obj.name.startswith(fname+str(fi)):
+                            if fi == 1:
+                                par_joint = get_object(obj.name.replace(fname+str(fi)+'_loc', 'hand_loc'))
+                            else:
+                                par_joint = get_object(obj.name.replace(fname+str(fi)+'_loc', fname+str(fi-1)+'_loc'))
                 
                     
                 if par_joint:
@@ -780,9 +1093,11 @@ class ARP_OT_markers_fx(Operator):
                             
                 shader = gpu.shader.from_builtin(self.shader_img_type)
                 scale = 20
+                if 'thumb' in obj.name or 'index' in obj.name or 'middle' in obj.name or 'ring' in obj.name or 'pinky' in obj.name:
+                    scale = 10
                 batch = batch_for_shader(shader, 'TRI_FAN', 
-                    {"pos": ((_x-scale, _y-scale), (_x+scale, _y-scale), (_x+scale, _y+scale), (_x-scale, _y+scale)),
-                    "texCoord": ((0, 0), (1, 0), (1, 1), (0, 1))})
+                    {'pos': (( float(_x-scale), float(_y-scale)), (float( _x+scale), float(_y-scale)), (float(_x+scale), float(_y+scale)), (float(_x-scale), float(_y+scale))),
+                    'texCoord': ((0, 0), (1, 0), (1, 1), (0, 1))})
                     
                 # line connection
                 shader_line = None
@@ -791,11 +1106,27 @@ class ARP_OT_markers_fx(Operator):
                     shader_line = gpu.shader.from_builtin(self.shader_type)
                     batch_line = batch_for_shader(shader_line, 'LINES', {'pos': (par_object_loc_2d, object_loc_2d)})
 
+                line_color = self.border_color
+                
                 # Highlight the selected marker/mouse over     
                 self.tex = gpu.texture.from_image(self.img_circle)
-                
-                final_color = self.circle_color
-                border_final_color = self.border_color
+                if 'thumb' in obj.name:
+                    self.tex = gpu.texture.from_image(self.img_circle_yellow)
+                    line_color = self.yellow_color
+                if 'index' in obj.name:
+                    self.tex = gpu.texture.from_image(self.img_circle_orange)
+                    line_color = self.orange_color
+                if 'middle' in obj.name:
+                    self.tex = gpu.texture.from_image(self.img_circle_red)
+                    line_color = self.red_color
+                if  'ring' in obj.name:
+                    self.tex = gpu.texture.from_image(self.img_circle_violet)
+                    line_color = self.violet_color
+                if 'pinky' in obj.name:
+                    self.tex = gpu.texture.from_image(self.img_circle_blue)
+                    line_color = self.blue_color
+                    
+                final_color = self.circle_color                
 
                 if self.mouse_x:
                     is_in_hotspot = bool((Vector((_x, _y)) - Vector((self.mouse_x, self.mouse_y))).magnitude < 22)
@@ -807,13 +1138,13 @@ class ARP_OT_markers_fx(Operator):
 
                 # Render               
                 shader.bind()                    
-                shader.uniform_sampler("image", self.tex) 
+                shader.uniform_sampler('image', self.tex) 
                 batch.draw(shader)                    
                     
                 #   line connection
                 if par_object_loc_2d:
                     shader_line.bind()
-                    shader_line.uniform_float("color", border_final_color)#self.border_color)               
+                    shader_line.uniform_float('color', line_color)
                     batch_line.draw(shader_line)
                     
                     
@@ -826,6 +1157,8 @@ class ARP_OT_markers_fx(Operator):
                     bname = get_facial_marker_vert_bone(vert.index)
                     if bname == None:
                         continue
+                    if vert.hide:
+                        continue
                         
                     vert_loc_2d = bpy_extras.view3d_utils.location_3d_to_region_2d(self.region, self.region_3d, facial_mesh.matrix_world @ vert.co, default=None)
                     _x = vert_loc_2d[0]
@@ -834,7 +1167,7 @@ class ARP_OT_markers_fx(Operator):
                     shader = gpu.shader.from_builtin(self.shader_img_type)
                     scale = 10
                     batch = batch_for_shader(shader, 'TRI_FAN', 
-                        {"pos": ((_x-scale, _y-scale), (_x+scale, _y-scale), (_x+scale, _y+scale), (_x-scale, _y+scale)),
+                        {"pos": ( (float(_x-scale), float(_y-scale) ), ( float(_x+scale), float(_y-scale)), ( float(_x+scale), float(_y+scale)), ( float(_x-scale), float(_y+scale))),
                         "texCoord": ((0, 0), (1, 0), (1, 1), (0, 1))})
                         
                     shader.bind()
@@ -854,13 +1187,16 @@ class ARP_OT_markers_fx(Operator):
                 for edge in _mesh.edges:       
                     v1 = edge.verts[0]
                     v2 = edge.verts[1]
+                    if v1.hide or v2.hide:
+                        continue
+                    
                     vert1_loc_2d = bpy_extras.view3d_utils.location_3d_to_region_2d(self.region, self.region_3d, facial_mesh.matrix_world @ v1.co, default=None)
                     vert2_loc_2d = bpy_extras.view3d_utils.location_3d_to_region_2d(self.region, self.region_3d, facial_mesh.matrix_world @ v2.co, default=None)
                     shader_line = gpu.shader.from_builtin(self.shader_type)
                     batch_line = batch_for_shader(shader_line, 'LINES', {'pos': (vert1_loc_2d, vert2_loc_2d)})
                     shader_line.bind()
                     
-                    line_color = border_final_color
+                    line_color = self.border_color
                     bname = get_facial_marker_vert_bone(v1.index)
                     if 'eyebrow' in bname:   
                         line_color = self.yellow_color
@@ -873,8 +1209,7 @@ class ARP_OT_markers_fx(Operator):
                     batch_line.draw(shader_line)
                 
                 del _mesh
-                    
-                    
+                
         
     def modal(self, context, event):    
         if bpy.context.scene.arp_disable_smart_fx:
@@ -884,8 +1219,9 @@ class ARP_OT_markers_fx(Operator):
         if context.area:
             context.area.tag_redraw()
 
-        # clicking in a empty space in 2.8 can deselect everything
+        # clicking in a empty space in 2.8 can deselect everything when using Right Click Select
         # workaround to ensure selection by selecting it again
+        #print('arp_marker_to_select', context.scene.arp_marker_to_select)
         if context.scene.arp_marker_to_select != "":
             marker_obj = get_object(context.scene.arp_marker_to_select)
             if marker_obj:
@@ -912,7 +1248,6 @@ class ARP_OT_markers_fx(Operator):
                 if img:
                     bpy.data.images.remove(img)
                     
-            context.scene.arp_smart_markers_enable = False
 
             return {'FINISHED'}
 
@@ -979,6 +1314,26 @@ class ARP_OT_markers_fx(Operator):
                 img = bpy.data.images.load(fp)
                 img.name = self.img_red_name
             self.img_circle_red = img
+            
+        if self.img_circle_orange == None:
+            img = bpy.data.images.get(self.img_orange_name)
+            if img == None:
+                dir = os.path.dirname(os.path.abspath(__file__))
+                addon_dir = os.path.dirname(dir)
+                fp = addon_dir + '/icons/circle_orange.png'
+                img = bpy.data.images.load(fp)
+                img.name = self.img_orange_name
+            self.img_circle_orange = img
+            
+        if self.img_circle_violet == None:
+            img = bpy.data.images.get(self.img_violet_name)
+            if img == None:
+                dir = os.path.dirname(os.path.abspath(__file__))
+                addon_dir = os.path.dirname(dir)
+                fp = addon_dir + '/icons/circle_violet.png'
+                img = bpy.data.images.load(fp)
+                img.name = self.img_violet_name
+            self.img_circle_violet = img
         
 
         # get mouse select button
@@ -999,7 +1354,6 @@ class ARP_OT_markers_fx(Operator):
         if self.active == True:
             if bpy.context.scene.arp_debug_mode:
                 print('Start Markers FX')
-            context.scene.arp_smart_markers_enable = True
             
             if bpy.context.scene.arp_disable_smart_fx == False:
                 handles[0] = bpy.types.SpaceView3D.draw_handler_add(self.draw_callback_3_args, args, 'WINDOW', 'POST_PIXEL')
@@ -1011,7 +1365,10 @@ class ARP_OT_markers_fx(Operator):
         
 
     def draw_callback_3_args(self, op, context):
-        self.region = context.region
+        try:
+            self.region = context.region
+        except:
+            return
         self.region_3d = context.space_data.region_3d
         self.draw(self)
 
@@ -1026,21 +1383,20 @@ class ARP_OT_add_marker(Operator):
     body_part : StringProperty(name="Body Part")
     body_width : FloatProperty()
     body_height : FloatProperty()
+    mouse_select = None
+    mouse_deselect = None
     
-
     @classmethod
     def poll(cls, context):
-        return (context.active_object != None)
-        
-
-    def __init__(self):
-        self.mouse_select = None
-        self.mouse_deselect = None
-        
+        return (context.active_object != None)        
 
     # First create the markers objects
     def execute(self, context):        
         try:
+            # disable markers depth by default, when placing manually the markers
+            if self.body_part == 'neck':
+                context.scene.arp_smart_depth = False
+            
             _add_marker(self.body_part, True)
             context.scene.arp_marker_to_select = self.body_part + "_loc"# ensure to select the new marker
 
@@ -1060,8 +1416,9 @@ class ARP_OT_add_marker(Operator):
         new_marker_obj.location = bpy_extras.view3d_utils.region_2d_to_location_3d(_region, _region_3d, (event.mouse_region_x, event.mouse_region_y), new_marker_obj.location)
 
         #limits
+        mid_markers = ['neck', 'root', 'chin', 'head_tip']
         if context.scene.arp_smart_sym:
-            if new_marker_obj.location[0] < 0 or self.body_part=="neck" or self.body_part == "root" or self.body_part == "chin":
+            if new_marker_obj.location[0] < 0 or self.body_part in mid_markers:
                 new_marker_obj.location[0] = 0
                 
         if new_marker_obj.location[0] > self.body_width/2:
@@ -1131,9 +1488,24 @@ class ARP_OT_add_marker(Operator):
             return {'CANCELLED'}
 
 
+class ARP_MT_optional_markers_menu(Menu):
+    bl_label = "Optional Markers"
+    
+    def draw(self, _context):
+        layout = self.layout
+        if get_object('hand_tip') == None:
+            layout.operator("id.add_marker", text="Hand Tip").body_part = 'hand_tip'
+        if get_object('thigh_loc') == None:
+            layout.operator("id.add_marker", text="Thigh").body_part = 'thigh'
+        if get_object('knee_loc') == None:
+            layout.operator("id.add_marker", text="Knee").body_part = 'knee'
+        if get_object('elbow_loc') == None:
+            layout.operator("id.add_marker", text="Elbow").body_part = 'elbow'
+        if get_object('head_tip_loc') == None:
+            layout.operator("id.add_marker", text="Head Tip").body_part = 'head_tip'
+        
+            
 class ARP_OT_delete_detected(Operator):
-
-    #tooltip
     """Delete the detected markers"""
 
     bl_idname = "id.delete_detected"
@@ -1205,13 +1577,20 @@ class ARP_OT_cancel_and_delete_markers(Operator):
             # restore initial visibility states of all objects
             for obj in bpy.data.objects:
                 if 'arp_smart_viz_state' in obj.keys():
-                    obj.hide_set(obj['arp_smart_viz_state'][0])
-                    obj.hide_viewport = obj['arp_smart_viz_state'][1]
+                    try:
+                        obj.hide_set(obj['arp_smart_viz_state'][0])
+                        obj.hide_viewport = obj['arp_smart_viz_state'][1]
+                    except:
+                        pass
                     del obj['arp_smart_viz_state']
 
+
             if 'rigs_found' in scn.keys():
-                if get_object(scn.rigs_found):
-                    unhide_object(get_object(scn.rigs_found))
+                try:# debug, rigs_found is corrupted in a rare file case, returns 0
+                    if get_object(scn.rigs_found):
+                        unhide_object(get_object(scn.rigs_found))
+                except:
+                    pass  
 
             _cancel_and_delete_markers()
 
@@ -1251,8 +1630,55 @@ def get_mouse_select():
 
 def shrinkwrap(source_obj, target_obj, ray_dir):
     depsgraph = bpy.context.evaluated_depsgraph_get()
-
+    scn = bpy.context.scene
+    
+    ear_verts = []
+    eyebrow_verts = []
+    nose_verts = ['nose_01.x', 'nose_03.x']
+    cheek_verts = []
+    eye_verts = [i for i in ard.facial_markers if i.startswith('eyelid')]
+    mouth_verts = [i for i in ard.facial_markers if i.startswith('lips')]
+    chin_verts = [i for i in ard.facial_markers if i.startswith('chin')]
+    
+    for s in ['.l', '.r']:
+        ear_verts.append(ard.facial_markers['ear_01'+s])
+        ear_verts.append(ard.facial_markers['ear_02'+s])
+        eyebrow_verts.append(ard.facial_markers['eyebrow_01_end'+s])
+        eyebrow_verts.append(ard.facial_markers['eyebrow_01'+s])
+        eyebrow_verts.append(ard.facial_markers['eyebrow_02'+s])
+        eyebrow_verts.append(ard.facial_markers['eyebrow_03'+s])
+        cheek_verts.append(ard.facial_markers['cheek_smile'+s])
+        cheek_verts.append(ard.facial_markers['cheek_inflate'+s])
+    
     for vert in source_obj.data.vertices:
+        if scn.arp_smart_ears == False:
+            if vert.index in ear_verts:
+                continue
+        
+        if scn.arp_smart_eyebrows == False:
+            if vert.index in eyebrow_verts:
+                continue
+                
+        if scn.arp_smart_nose == False:
+            if vert.index in nose_verts:
+                continue
+                
+        if scn.arp_smart_cheeks == False:
+            if vert.index in cheek_verts:
+                continue
+                
+        if scn.arp_smart_eyes == False:
+            if vert.index in eye_verts:
+                continue
+                
+        if scn.arp_smart_mouth == False:
+            if vert.index in mouth_verts:
+                continue
+                
+        if scn.arp_smart_chin == False:
+            if vert.index in chin_verts:
+                continue
+                
         ori = source_obj.matrix_world @ vert.co
         obj_eval = depsgraph.objects.get(target_obj.name, None)
         if obj_eval:
@@ -1418,55 +1844,68 @@ def _facial_setup():
 
     if not arp_facial_is_there:
         # set pos and scale
-        if get_object("chin_loc"):# backward-compatibility
-            chin_loc = get_object("chin_loc").location
+        chin_loc = get_object("chin_loc")
+        chin_loc_pos = None
+        
+        if chin_loc:# backward-compatibility
+            chin_loc_pos = chin_loc.location.copy()
         else:
-            chin_loc = get_object("neck_loc").location
-        obj.location[2] = chin_loc[2]
+            chin_loc_pos = get_object("neck_loc").location.copy()
+            
+        obj.location[2] = chin_loc_pos[2]
 
         body = get_object(scn.arp_body_name)
-
+        head_tip_loc = get_object('head_tip_loc')
+        
         if scn.arp_smart_type == 'BODY':
-            body_height = body.dimensions[2]
-            head_height = body_height - chin_loc[2]
+            body_height = body.dimensions[2]            
+            if head_tip_loc:
+                body_height = head_tip_loc.location[2]
+                
+            head_height = body_height - chin_loc_pos[2]
             obj.dimensions[2] = head_height
             obj.scale = [obj.scale[2]*0.55, obj.scale[2]*0.55, obj.scale[2]*0.55]
             
         elif scn.arp_smart_type == 'FACIAL':
             body_top = body.bound_box[1][2]
-            chin_z = chin_loc[2]
+            chin_z = chin_loc_pos[2]
             head_height = body_top - chin_z
             obj.dimensions[2] = head_height
-            obj.scale = [obj.scale[2]*0.55, obj.scale[2]*0.55, obj.scale[2]*0.55]        
+            obj.scale = [obj.scale[2]*0.55, obj.scale[2]*0.55, obj.scale[2]*0.55]    
+            
+            if head_tip_loc == None:                            
+                _add_marker('head_tip', False)
+                marker_obj = get_object('head_tip_loc')
+                marker_obj.location = chin_loc_pos + Vector((0, 0, head_height))
+                
+                bpy.ops.object.select_all(action='DESELECT')
+                set_active_object('arp_facial_setup')
     
+    bpy.ops.view3d.view_axis(type='FRONT')
+    bpy.ops.view3d.view_selected(use_all_regions=False)    
     
-    bpy.ops.view3d.view_selected(use_all_regions=False)
-
     bpy.ops.object.mode_set(mode='EDIT')
 
     # switch to Solid mode, "In Front" is only compatible with this mode
-    current_area = bpy.context.area
-    space_view3d = [i for i in current_area.spaces if i.type == "VIEW_3D"]
-    space_view3d[0].shading.type = 'SOLID'  
+    #  [Should not be necessary anymore. Comment out grey solid shading for now]
+    #current_area = bpy.context.area
+    #space_view3d = [i for i in current_area.spaces if i.type == "VIEW_3D"]
+    #space_view3d[0].shading.type = 'SOLID'  
 
 
 def _restore_markers():
     scene = bpy.context.scene
-
-    # Mirror state
-    val_bool = True
+    print('Restore markers...')
+  
     for item in scene.arp_markers_save:
         if item.name == "mirror_state":
-            val = item.location[0]
-            val_bool = True
-            if val == 0:
-                val_bool = False
-
-    scene.arp_smart_sym = val_bool
-
+            val = int(item.location[0])
+            scene.arp_smart_sym = True if val == 1 else False
+            print('Restored Mirror', val)        
+    
     # Body markers
     for item in scene.arp_markers_save:
-        if item.name != "mirror_state":
+        if not '_state' in item.name:
             if not "sym_loc" in item.name:# ensure retro-compatibility, names changed
                 marker_obj = get_object(item.name)
                 if marker_obj == None:
@@ -1474,10 +1913,13 @@ def _restore_markers():
                     _add_marker(item.name.replace("_loc", ""), False)
                     marker_obj = get_object(item.name) 
                     
+                    if marker_obj == None:
+                        continue
+                        
                 marker_obj.location = item.location
 
     # Facial markers
-    if len(scene.arp_facial_markers_save) > 0:
+    if len(scene.arp_facial_markers_save):
         _facial_setup()
         bpy.ops.object.editmode_toggle()#must switch to object mode to update the datas
 
@@ -1485,8 +1927,36 @@ def _restore_markers():
             facial_setup = get_object("arp_facial_setup")
             facial_setup.data.vertices[item.id].co = facial_setup.matrix_world.inverted() @ item.location
 
-        bpy.ops.object.editmode_toggle()
+        bpy.ops.object.editmode_toggle()        
         
+    for item in scene.arp_markers_save:      
+        if item.name == "ears_state":
+            val = int(item.location[0])
+            scene.arp_smart_ears = True if val == 1 else False
+        if item.name == 'eyebrows_state':
+            val = int(item.location[0])
+            scene.arp_smart_eyebrows = True if val == 1 else False
+        if item.name == 'nose_state':
+            val = int(item.location[0])
+            scene.arp_smart_nose = True if val == 1 else False
+        if item.name == 'cheek_state':
+            val = int(item.location[0])
+            scene.arp_smart_cheeks = True if val == 1 else False
+        if item.name == 'eyes_state':
+            val = int(item.location[0])
+            scene.arp_smart_eyes = True if val == 1 else False
+        if item.name == 'mouth_state':
+            val = int(item.location[0])
+            scene.arp_smart_mouth = True if val == 1 else False
+        if item.name == 'tongue_state':
+            val = int(item.location[0])
+            scene.arp_smart_tongue = True if val == 1 else False
+        if item.name == 'teeth_state':
+            val = int(item.location[0])
+            scene.arp_smart_teeth = True if val == 1 else False
+        if item.name == 'chin_state':
+            val = int(item.location[0])
+            scene.arp_smart_chin = True if val == 1 else False
 
     #enable markers fx
     try:
@@ -1497,6 +1967,7 @@ def _restore_markers():
         if bpy.context.scene.arp_debug_mode:
             print('No handler to remove')
         pass
+        
     bpy.ops.id.markers_fx(active=True)
 
 
@@ -1575,6 +2046,8 @@ def init_selection(active_bone):
     bpy.ops.pose.select_all(action='DESELECT')
     if (active_bone != "null"):
         bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones[active_bone].bone #set the active bone for mirror
+        if bpy.app.version >= (5,0,0):
+            bpy.context.active_object.pose.bones[active_bone].select = True
     bpy.ops.object.mode_set(mode='EDIT')
 
 
@@ -1592,6 +2065,1411 @@ def mirror_hack():
 
 
 # OPERATOR FUNCTIONS -------------------------------------------------------------
+def run_process(bin_path, img_name, threshold, fingers_amount):        
+    #  Front   
+    print("Running", bin_path, img_name, fingers_amount, threshold)
+    args = [bin_path]
+    if img_name:
+        args.append(img_name)
+    if fingers_amount:
+        args.append(fingers_amount)
+    if threshold:
+        args.append(threshold)
+
+    result = subprocess.run(args, capture_output=True, text=True)
+    
+    print(f"{bin_path} completed with return code {result.returncode}")
+    if result.stdout:
+        print(f"Output: {result.stdout}")
+    if result.stderr:
+        print(f"Errors: {result.stderr}")
+    return result
+    
+    
+def _fetch_facial_keypoints(self):
+    print("Fetch facial keypoints...")
+    
+    facial_keypoints = []
+    scn = bpy.context.scene
+    
+    for i in range(1, scn.arp_smart_AI_facial_samples+1):
+        kp_path = os.path.join(self.inf_path, 'facial'+str(i)+'_kp.py')
+        if os.path.exists(kp_path):# failed prediction if not
+            with open(kp_path) as f:
+                facial_keypoints.append(json.loads(f.readline()))    
+    
+    self.keypoints = facial_keypoints
+    
+    
+def _fetch_fingers_keypoints(self, side):
+    print("Fetch fingers keypoints...")
+    
+    for i in range(1,self.hand_idx+1):
+        kp_path = os.path.join(self.inf_path, 'hand'+str(i)+side+'_kp.py')
+        dict_file = {}
+        
+        if os.path.exists(kp_path):# failed prediction if not
+            with open(kp_path) as f:
+                dict_file = json.loads(f.readline())
+            
+        dict_name = f"dict{i}"+side
+        self.keypoints[dict_name] = dict_file
+ 
+    
+def _fetch_keypoints(self):
+    print("Fetch keypoints...")
+    scn = bpy.context.scene
+    
+    # Front
+    fronts_keypoints = []
+    for i in range(1, scn.arp_smart_AI_body_samples+1):
+        kp_path = os.path.join(self.inf_path, 'front'+str(i)+'_kp.py')
+        with open(kp_path) as f:
+            fronts_keypoints.append(json.loads(f.readline()))
+    
+    self.dicts_front = fronts_keypoints
+    #print("dicts_front", dicts_front)
+    
+    # Side
+    sides_keypoints = []
+    side_samples = 1#scn.arp_smart_AI_body_samples
+    for i in range(1, side_samples+1):
+        kp_path = os.path.join(self.inf_path, 'side'+str(i)+'_kp.py')
+        with open(kp_path) as f:
+            sides_keypoints.append(json.loads(f.readline()))
+    
+    self.dicts_side = sides_keypoints
+        
+    # symmetrize dict_side
+    dicts_side_copy = self.dicts_side.copy()
+    
+    for dict_side in dicts_side_copy:
+        for n in ['shoulder', 'wrist', 'ankle', 'thigh', 'knee', 'hand_tip', 'elbow']:            
+            for s in ['left_', 'right_']:            
+                dict_side[s+n] = dict_side[n]
+            del dict_side[n]
+    
+    self.dicts_side = dicts_side_copy
+
+    # Top
+    tops_keypoints = []
+    top_samples = 1#scn.arp_smart_AI_body_samples
+    for i in range(1, top_samples+1):
+        kp_path = os.path.join(self.inf_path, 'top'+str(i)+'_kp.py')
+        with open(kp_path) as f:
+            tops_keypoints.append(json.loads(f.readline()))
+            
+    self.dicts_top = tops_keypoints
+
+
+def _screenshot_cleanup(self):
+    scn = bpy.context.scene
+    img_list = ['char_side', 'char_top']
+    
+    if 'front_samples_rot' in dir(self):
+        for i in range(1, scn.arp_smart_AI_body_samples+1):
+            img_list.append('front'+str(i))
+            
+    if 'side_samples_offset' in dir(self):
+        side_samples = 1#scn.arp_smart_AI_body_samples
+        for i in range(1, side_samples+1):
+            img_list.append('side'+str(i))
+            
+    if 'top_samples_rot' in dir(self):
+        top_samples = 1#scn.arp_smart_AI_body_samples
+        for i in range(1, top_samples+1):
+            img_list.append('top'+str(i))
+            
+    if 'facial_samples_rot' in dir(self):
+        for i in range(1, scn.arp_smart_AI_facial_samples+1):
+            img_list.append('facial'+str(i))
+    
+    if 'hand_idx' in dir(self):
+        for i in range(1, self.hand_idx+1):
+            for s in ['_l', '_r']:
+                img_list.append('hand'+str(i)+s)
+    
+    for imgname in img_list:
+        img = os.path.join(self.inf_path, imgname+'.jpg')
+        try:
+            os.remove(img)
+        except:
+            pass
+        
+    dico_list = ['kp_side', 'kp_top', 'facial_kp']
+    
+    if 'hand_idx' in dir(self):
+        for i in range(1, self.hand_idx+1):
+            for s in ['_l', '_r']:
+                dico_list.append('hand'+str(i)+s+'_kp')
+                
+    if 'front_samples_rot' in dir(self):        
+        for i in range(1, scn.arp_smart_AI_body_samples+1):
+            dico_list.append('front'+str(i)+'_kp')
+            
+    if 'side_samples_offset' in dir(self):
+        side_samples = 1
+        for i in range(1, side_samples+1):
+            dico_list.append('side'+str(i)+'_kp')
+            
+    if 'top_samples_rot' in dir(self):
+        top_samples = 1
+        for i in range(1, top_samples+1):
+            dico_list.append('top'+str(i)+'_kp')
+            
+    if 'facial_samples_rot' in dir(self):
+        for i in range(1, scn.arp_smart_AI_facial_samples+1):
+            dico_list.append('facial'+str(i)+'_kp')
+
+    for diconame in dico_list:
+        dico = os.path.join(self.inf_path, diconame+'.py')
+        try:
+            os.remove(dico)
+        except:
+            pass
+            
+            
+def _set_markers_facial_from_keypoints(self):
+    
+    arp_facial_setup = get_object('arp_facial_setup')
+    
+    bpy.ops.object.mode_set(mode='OBJECT')# object mode is required when setting vertex pos
+    
+    ortho_scale = self.cam_ortho    
+    scn = bpy.context.scene
+
+    facial_keypoints = {
+        'left_eyebrow1': 'eyebrow_01_end.l', 'left_eyebrow2': 'eyebrow_01.l', 'left_eyebrow3': 'eyebrow_02.l', 'left_eyebrow4': 'eyebrow_03.l',
+        'right_eyebrow1': 'eyebrow_01_end.r', 'right_eyebrow2': 'eyebrow_01.r', 'right_eyebrow3': 'eyebrow_02.r', 'right_eyebrow4': 'eyebrow_03.r',
+        'left_eyelid1': 'eyelid_corner_01.l', 'left_eyelid2': 'eyelid_top_01.l', 'left_eyelid3': 'eyelid_top_02.l', 'left_eyelid4': 'eyelid_top_03.l', 'left_eyelid5': 'eyelid_corner_02.l', 
+        'left_eyelid6': 'eyelid_bot_03.l', 'left_eyelid7': 'eyelid_bot_02.l', 'left_eyelid8': 'eyelid_bot_01.l',
+        'right_eyelid1': 'eyelid_corner_01.r', 'right_eyelid2': 'eyelid_top_01.r', 'right_eyelid3': 'eyelid_top_02.r', 'right_eyelid4': 'eyelid_top_03.r', 'right_eyelid5': 'eyelid_corner_02.r', 
+        'right_eyelid6': 'eyelid_bot_03.r', 'right_eyelid7': 'eyelid_bot_02.r', 'right_eyelid8': 'eyelid_bot_01.r',
+        'nose1': 'nose_01.x', 'nose2': 'nose_03.x',
+        'left_cheek1': 'cheek_inflate.l', 'left_cheek2': 'cheek_smile.l', 
+        'right_cheek1': 'cheek_inflate.r', 'right_cheek2': 'cheek_smile.r',
+        'left_ear1': 'ear_01.l', 'left_ear2': 'ear_02.l', 
+        'right_ear1': 'ear_01.r', 'right_ear2': 'ear_02.r',
+        'lip1': 'lips_top.x', 'lip2': 'lips_top.l', 'lip3': 'lips_top_01.l', 'lip4': 'lips_smile.l', 'lip5': 'lips_bot_01.l', 'lip6': 'lips_bot.l', 'lip7': 'lips_bot.x', 
+        'lip8': 'lips_bot.r', 'lip9': 'lips_bot_01.r', 'lip10': 'lips_smile.r', 'lip11': 'lips_top_01.r', 'lip12': 'lips_top.r',
+        'chin1': 'chin_02.x', 'chin2': 'chin_01.x'}
+    
+    print('self.keypoints', self.keypoints)
+    
+    # Filter out invalid facial points detected    
+    for dict_keypoints in self.keypoints:# 6 samples/dicts
+        to_del = []
+        
+        for point_name in dict_keypoints:
+            #print('Point name:', point_name, 'coords:', self.keypoints[point_name])
+            if dict_keypoints[point_name] == None:
+                feature_name = ''
+                if 'eyebrow' in point_name:
+                    feature_name = point_name.split('_')[0]+'eyebrow'# left_eyebrow
+                elif 'eyelid' in point_name: feature_name = point_name.split('_')[0]+'eyelid'
+                elif 'nose' in point_name: feature_name = 'nose'
+                elif 'cheek' in point_name: feature_name = point_name.split('_')[0]+'cheek'
+                elif 'ear' in point_name: feature_name = point_name.split('_')[0]+'ear'
+                elif point_name.startswith('lip'): feature_name = 'lip'
+                elif point_name.startswith('chin'): feature_name = 'chin'
+                
+                if not feature_name in to_del:
+                    print('Invalid keypoint:', point_name)
+                    to_del.append(feature_name)
+           
+        #  Disable missing facial features
+        #  from invalid keypoints
+        if 'left_eyebrow' in to_del and 'right_eyebrow' in to_del:
+            scn.arp_smart_eyebrows = False
+        if 'left_eyelid' in to_del and 'right_eyelid' in to_del:
+            scn.arp_smart_eyes = False
+        if 'nose' in to_del:
+            scn.arp_smart_nose = False
+        if 'left_cheek' in to_del and 'right_cheek' in to_del:
+            scn.arp_smart_cheeks = False
+        if 'left_ear' in to_del and 'right_ear' in to_del:
+            scn.arp_smart_ears = False
+        if 'lip' in to_del:
+            scn.arp_smart_mouth = False
+        if 'chin' in to_del:
+            scn.arp_smart_chin = False
+
+        #   from missing keypoints    
+        for point_name in facial_keypoints:
+            if point_name.startswith('left_'):# symmetricals           
+                if not point_name in dict_keypoints and not 'right'+point_name[4:] in dict_keypoints:
+                    print("Missing keypoint, disable facial feature:", point_name)
+                    if point_name[5:].startswith('eyebrow'):
+                        scn.arp_smart_eyebrows = False
+                    if point_name[5:].startswith('eyelid'):
+                        scn.arp_smart_eyes = False
+                    if point_name[5:].startswith('cheek'):
+                        scn.arp_smart_cheeks = False
+                    if point_name[5:].startswith('ear'):
+                        scn.arp_smart_ears = False
+                        
+            elif not point_name.startswith('right_'):# middles            
+                if not point_name in dict_keypoints:
+                    print("Missing keypoint, disable facial feature:", point_name)
+                    if point_name.startswith('nose'):
+                        scn.arp_smart_nose = False
+                    if point_name.startswith('lip'):
+                        scn.arp_smart_mouth = False
+                    if point_name.startswith('chin'):
+                        scn.arp_smart_chin = False
+             
+    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    #   remove keypoints
+    keypoints_copy = self.keypoints.copy()
+    
+    for dict_keypoints in keypoints_copy:
+        for feature_name in to_del:
+            count = 1
+            if 'eyebrow' in feature_name: count = 4
+            elif 'eyelid' in feature_name: count = 8
+            elif 'nose' in feature_name: count = 2
+            elif 'cheek' in feature_name: count = 2
+            elif 'ear' in feature_name: count = 2
+            elif 'lip' in feature_name: count = 12
+            elif 'chin' in feature_name: count = 2
+            for i in range(1, count):
+                point_name = feature_name+str(i)
+                if point_name in dict_keypoints:
+                    print('Remove keypoint:', point_name)
+                    del dict_keypoints[point_name]
+                
+    # For missing symmetrical facial points, force mirroring for now
+    for dict_keypoints in keypoints_copy:
+        missings = {}
+        
+        for point_name in dict_keypoints:     
+            mirror_point_name = None
+            if point_name.startswith('left_'):
+                mirror_point_name = 'right_'+point_name[5:]
+            if point_name.startswith('right_'):
+                mirror_point_name = 'left_'+point_name[6:]
+                
+            if mirror_point_name and not mirror_point_name in dict_keypoints:
+                mirror_coords = [256 - dict_keypoints[point_name][0], dict_keypoints[point_name][1]]
+                missings[mirror_point_name] = mirror_coords     
+
+        for point_name in missings:
+            print("Create missing mirror point:", point_name)
+            dict_keypoints[point_name] = missings[point_name]
+        
+    self.keypoints = keypoints_copy.copy()
+    
+    #   evaluate sampled positions
+    print('evaluate sampled positions...')
+    facial_samples_locs = {}
+
+    for i in range(1, len(self.keypoints)+1):
+        dict_facial = self.keypoints[i-1]
+        roty = self.facial_samples_rot[i-1]
+            
+        for kp_name in dict_facial:
+            #print('kp_name', kp_name, dict_facial[kp_name])
+            p = dict_facial[kp_name]
+            # normalize coords 0:256 > -1:1
+            coords = [0,0]
+            coords[0] = (p[0] - 128) / 128
+            coords[1] = -(p[1] - 128) / 128# invert Y        
+           
+            if i == 1:# straight
+                facial_samples_locs[kp_name] = [coords]            
+            else:                
+                # counter transforms
+                #   scale
+                coords[0] *= 1.05
+                coords[1] *= 1.05
+                #   rot
+                corrected_loc = rotate_point(Vector((coords[0], 0, coords[1])), roty, Vector((0, 1, 0)), Vector((0, 0, 0)))
+                coords[0], coords[1] = corrected_loc[0], corrected_loc[2]
+                
+                if kp_name in facial_samples_locs:
+                    facial_samples_locs[kp_name].append(coords)                
+                else:
+                    facial_samples_locs[kp_name] = [coords]
+                
+      
+    arp_facial_setup.location[2] = self.cams_data[0].translation[2]
+    
+    facial_def_locs = {}
+    
+    # average samples locations
+    print('average locations...')
+    for kp_name in facial_samples_locs:
+        #print('averaging', kp_name, '...')
+        sum_x = 0.0
+        sum_z = 0.0
+        for loc_x, loc_z in facial_samples_locs[kp_name]:
+            #print('  ', round(loc_x, 2), round(loc_z, 2))
+            sum_x += loc_x
+            sum_z += loc_z
+       
+        av_loc_x = sum_x / len(facial_samples_locs[kp_name])
+        av_loc_z = sum_z / len(facial_samples_locs[kp_name])
+        facial_def_locs[kp_name] = (av_loc_x, av_loc_z)
+        
+        
+    print("Extract coords...")
+    for kp_name in facial_def_locs:
+        #print('extracting coord:', kp_name, facial_def_locs[kp_name])
+        loc_x, loc_z = facial_def_locs[kp_name]
+        point_3d_coords = (Vector((loc_x, 0.0, loc_z))) * (ortho_scale*0.5) / arp_facial_setup.scale[0]
+        translated_name = facial_keypoints[kp_name]
+        vert_idx = ard.facial_markers[translated_name]
+        vert = arp_facial_setup.data.vertices[vert_idx]
+        #print("Set facial marker:", kp_name, point_3d_coords)
+        vert.co[0], vert.co[2] = point_3d_coords[0], point_3d_coords[2]
+        
+    
+    # If Mirror is enabled, compute averaged mirror coordinates
+    if scn.arp_smart_sym:
+        for point_name in facial_def_locs:
+            left_name = None
+            
+            if point_name.startswith('left_'):
+                left_name = point_name    
+                right_name = 'right_'+left_name[5:]  
+
+            elif point_name.startswith('lip'):
+                lip_mirror_matches = {'lip2': 'lip12', 'lip3': 'lip11', 'lip4': 'lip10', 'lip5': 'lip9', 'lip6':'lip8'}
+                if point_name in lip_mirror_matches:
+                    left_name = point_name
+                    right_name = lip_mirror_matches[left_name]
+                elif point_name in ['lip1', 'lip7']:# middle lips
+                    translated_name = facial_keypoints[point_name]
+                    vert_idx = ard.facial_markers[translated_name]
+                    vert = arp_facial_setup.data.vertices[vert_idx]
+                    vert.co[0] = 0.0
+                    
+            if left_name:
+                left_translated_name = facial_keypoints[point_name]
+                left_vert_idx = ard.facial_markers[left_translated_name]
+                left_vert = arp_facial_setup.data.vertices[left_vert_idx]            
+                
+                translated_right_name = facial_keypoints[right_name]
+                right_vert_idx = ard.facial_markers[translated_right_name]
+                right_vert = arp_facial_setup.data.vertices[right_vert_idx]
+                
+                x_avg = (abs(left_vert.co[0]) + abs(right_vert.co[0])) / 2
+                y_avg = (left_vert.co[2] + right_vert.co[2]) / 2
+                #print("Set facial marker:", point_name)
+                left_vert.co[0], left_vert.co[2] = x_avg, y_avg
+                right_vert.co[0], right_vert.co[2] = -x_avg, y_avg
+                
+            # mid markers
+            if not point_name.startswith(('left_', 'right_', 'lip')):
+                translated_name = facial_keypoints[point_name]
+                vert_idx = ard.facial_markers[translated_name]
+                vert = arp_facial_setup.data.vertices[vert_idx]
+                vert.co[0] = 0.0
+            
+    
+    bpy.ops.object.mode_set(mode='EDIT')
+    
+    print("Done.")
+
+            
+def _screenshot_facial(self):
+    body_temp = get_object('body_temp')
+    scn = bpy.context.scene
+    facial_obj = get_object('arp_facial_setup')
+    
+    chin_loc = get_object('chin_loc').location.copy()
+    neck_marker = get_object('neck_loc')
+    neck_loc = None
+    if neck_marker:
+        neck_loc = neck_marker.location.copy()
+        
+    head_tip_loc = get_object('head_tip_loc')
+    if head_tip_loc == None:
+        self.report({'ERROR'}, 'Add the head tip marker first')
+        return
+        
+    body_height = head_tip_loc.location[2]#body_temp.dimensions[2]
+    head_height = body_height - chin_loc[2]
+    
+    margin = 1.2# if scn.sc_large_head == False else 2
+    # get character dims
+    bbox_corners = [body_temp.matrix_world @ Vector(corner) for corner in body_temp.bound_box]
+    y1 = bbox_corners[0][1]
+    y2 = bbox_corners[6][1]
+    z1 = bbox_corners[0][2]
+    z2 = bbox_corners[2][2]
+
+    dim_y = abs(y2-y1)
+    dim_z = abs(z2-z1)
+    
+    chin_loc_tip = chin_loc[2]
+    if neck_loc:
+        neck_length = chin_loc[2] - neck_loc[2]
+        chin_loc_tip = chin_loc[2] - (neck_length * 0.3)
+        
+    midz = (body_height + chin_loc_tip) * 0.5
+    
+    # create temp camera
+    curr_cam = bpy.context.scene.camera
+    curr_cam_name = ''
+    if curr_cam:
+        curr_cam_name = curr_cam.name
+        
+    cam_name = 'arp_cam_head'
+    cam_data = bpy.data.cameras.new(name=cam_name)
+    cam_obj = bpy.data.objects.new(cam_name, cam_data)
+    bpy.context.collection.objects.link(cam_obj)
+    bpy.context.scene.camera = cam_obj
+    cam_obj.data.type = 'ORTHO'
+    cam_obj.data.ortho_scale = head_height * margin
+    self.cam_ortho = cam_obj.data.ortho_scale# store value
+    
+    current_area = bpy.context.area
+    
+    # store current viewport cam
+    view_matrix_copy = bpy.context.space_data.region_3d.view_matrix.copy()
+    view_persp_copy = bpy.context.space_data.region_3d.view_perspective
+    
+    #   switch to camera view
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            for space in area.spaces:
+                if space.type == 'VIEW_3D':
+                    space.region_3d.view_perspective = 'CAMERA'
+                    space.use_local_camera = False
+                    break
+                    
+    print(get_current_shading())
+    use_texture = False
+    
+    if get_current_shading() in ['MATERIAL', 'RENDERED']:# use textures
+        #cur_studio_light, theme_color, theme_gradient = switch_to_material_shading()   
+        use_texture = True
+    else:
+        cur_shade, cur_studio_light, cur_color_type, cur_color_single, cur_light, cur_world_space_light, cur_cavity, cur_backg_type, cur_backg_color, cur_xray = switch_to_solid_shading()        
+    
+    curr_overlays = disable_overlays()
+    cur_resolx, cur_resoly, curr_rend_perc, cur_film_transp, cur_color_space, curr_color_mode, curr_file_format, curr_media_type = set_resol(textured=use_texture)
+    
+    cam_obj.location = (chin_loc[0], chin_loc[1] - dim_y*10, midz)
+    cam_obj.rotation_euler = [math.pi/2, 0, 0]    
+    cam_obj.data.clip_end = (y2 - cam_obj.location[1]) * 2    
+    
+    bpy.ops.transform.translate(value=(0, 0, 0), orient_type='NORMAL')# trigger update
+    
+    def save_cams_data():
+        self.cams_data.append(cam_obj.matrix_world.copy())
+    
+    
+    # Samples -jitter cam rot
+    picked_angles = [0]
+    
+    for i in range(1, scn.arp_smart_AI_facial_samples+1):
+        roty = 0        
+        if i == 1:
+            save_cams_data()
+        if i == 2:
+            cam_obj.data.ortho_scale *= 1.05
+        if i > 1:# first is always straight
+            max_angle = 12# 15 is max
+            rand_angle = random.randint(-max_angle,max_angle)
+            iter = 1
+            while rand_angle in picked_angles and iter < 50:# new unique angle must be picked
+                rand_angle = random.randint(-max_angle,max_angle)
+                
+            picked_angles.append(rand_angle)
+            roty = math.radians(rand_angle)
+            cam_obj.rotation_euler[1] = roty
+        
+        self.facial_samples_rot.append(roty)
+    
+        # render facial screenshot
+        img_name = 'facial'+str(i)+'.jpg'
+        save_path = os.path.join(self.inf_path, img_name)
+        bpy.ops.render.opengl(write_still=False)
+        bpy.data.images['Render Result'].save_render(filepath=bpy.path.abspath(save_path))
+        
+    
+    # delete temp cam
+    bpy.data.objects.remove(cam_obj)
+    
+    # restore render settings
+    restore_resol(cur_resolx, cur_resoly, curr_rend_perc, cur_film_transp, cur_color_space, curr_color_mode, curr_file_format, curr_media_type)
+    restore_overlays(curr_overlays)
+    #if use_texture:
+    #    restore_shading_texture(cur_studio_light, theme_color, theme_gradient)
+    #else:
+    if not use_texture:
+        restore_shading(cur_shade, cur_studio_light, cur_color_type, cur_color_single, cur_light, cur_world_space_light, cur_cavity, cur_backg_type, cur_backg_color, cur_xray)
+    
+    # restore front view
+    # restore view
+    bpy.context.space_data.region_3d.view_matrix = view_matrix_copy
+    bpy.context.space_data.region_3d.view_perspective = view_persp_copy
+    
+    
+def _screenshot_fingers(self, side):
+    body_temp = get_object('body_temp')
+    scn = bpy.context.scene
+    
+    set_active_object(body_temp.name)    
+    
+    # add subsurf modifier, better shading results for low poly meshes
+    subsurf_mod = None
+    if len(body_temp.data.polygons) < 6000:
+        subsurf_mod = body_temp.modifiers.new('Subsurf', 'SUBSURF')        
+        
+    margin = 1.6
+    rotate_field = 65
+    rotate_field += (scn.arp_smart_AI_samples - 5) * 4# increase the rotational field as we add more samples to increase chances of better fingers visibility
+    
+    # setup camera according to current hand_loc and hand_tip_loc markers
+    cam_name = 'arp_cam_fingers'
+    cam_data = bpy.data.cameras.new(cam_name)
+    cam_obj = bpy.data.objects.new(cam_name, cam_data)
+    bpy.context.collection.objects.link(cam_obj)
+    bpy.context.scene.camera = cam_obj
+                      
+    hand_loc_name = 'hand_loc' if side == '_l' else 'hand_loc_sym'
+    hand_loc = get_object(hand_loc_name)
+    hand_tip_loc_name = 'hand_tip_loc' if side == '_l' else 'hand_tip_loc_sym'
+    hand_tip_loc = get_object(hand_tip_loc_name)
+    
+    hand_loc_pos = hand_loc.matrix_world.to_translation()
+    hand_tip_loc_pos = hand_tip_loc.matrix_world.to_translation()
+    
+    hand_dir = (hand_tip_loc_pos - hand_loc_pos)
+    hand_mid = (hand_tip_loc_pos + hand_loc_pos) * 0.5
+    side_fac = 1 if side == '_l' else -1
+    cam_pos = hand_mid + (Vector((0,-1*side_fac,0)).cross(hand_dir.normalized())).normalized() * hand_dir.magnitude
+    # position
+    cam_obj.location = cam_pos
+    bpy.ops.transform.translate(value=(0, 0, 0))
+    # orient
+    cam_obj.matrix_world = lookat_up_camera(cam_obj.matrix_world, hand_mid, (Vector((0,0,1*side_fac)).cross(hand_dir.normalized())).normalized())
+    # debug, zero out scale
+    cam_obj.scale = [1,1,1]
+    # position
+    cam_obj.location = cam_pos
+    
+    cam_obj.data.type = 'ORTHO'
+    cam_obj.data.ortho_scale = hand_dir.magnitude * margin
+    self.cam_ortho = cam_obj.data.ortho_scale# store value
+    cam_obj.data.clip_start = hand_dir.magnitude/100
+    cam_obj.data.clip_end = hand_dir.magnitude * 100
+    
+    current_area = bpy.context.area
+    
+    # store current viewport cam
+    view_matrix_copy = bpy.context.space_data.region_3d.view_matrix.copy()
+    view_persp_copy = bpy.context.space_data.region_3d.view_perspective
+    
+    #   switch to camera view
+    for space in current_area.spaces:
+        if space.type == 'VIEW_3D':
+            space.region_3d.view_perspective = 'CAMERA'
+            break
+    
+    cur_shade, cur_studio_light, cur_color_type, cur_color_single, cur_light, cur_world_space_light, cur_cavity, cur_backg_type, cur_backg_color, cur_xray = switch_to_solid_shading()
+    curr_overlays = disable_overlays()
+    
+    cur_resolx, cur_resoly, curr_rend_perc, cur_film_transp, cur_color_space, curr_color_mode, curr_file_format, curr_media_type = set_resol()    
+    
+    
+    def save_cams_data():
+        if side == '_l':
+            self.cams_data_l.append(cam_obj.matrix_world.copy())
+        elif side == '_r':
+            self.cams_data_r.append(cam_obj.matrix_world.copy())
+    
+    # Render screenshots
+    hand_idx = 1
+    save_path = os.path.join(self.inf_path, 'hand'+str(hand_idx)+side+'.jpg')
+    bpy.ops.render.opengl(write_still=False)
+    bpy.data.images['Render Result'].save_render(filepath=bpy.path.abspath(save_path))
+    save_cams_data()
+    
+    rot_angle = rotate_field/scn.arp_smart_AI_samples
+    
+    # forward    
+    for i in range(1, scn.arp_smart_AI_samples+1):
+        hand_idx += 1
+        rotate_object(cam_obj, math.radians(rot_angle), get_axis(cam_obj.matrix_world, 0), hand_mid)        
+        save_path = os.path.join(self.inf_path, 'hand'+str(hand_idx)+side+'.jpg')
+        bpy.ops.render.opengl(write_still=False)
+        bpy.data.images['Render Result'].save_render(filepath=bpy.path.abspath(save_path))
+        save_cams_data()  
+    
+    # backward
+    rotate_object(cam_obj, math.radians(-rotate_field), get_axis(cam_obj.matrix_world, 0), hand_mid)
+    
+    bpy.ops.transform.translate(value=(0, 0, 0), orient_type='NORMAL')# trigger update
+    
+    for i in range(1, scn.arp_smart_AI_samples+1):
+        hand_idx += 1
+        rotate_object(cam_obj, math.radians(-rot_angle), get_axis(cam_obj.matrix_world, 0), hand_mid)        
+        save_path = os.path.join(self.inf_path, 'hand'+str(hand_idx)+side+'.jpg')
+        bpy.ops.render.opengl(write_still=False)
+        bpy.data.images['Render Result'].save_render(filepath=bpy.path.abspath(save_path))
+        save_cams_data()   
+    
+    # delete temp cam
+    bpy.data.objects.remove(cam_obj)  
+    
+    # restore render settings
+    restore_resol(cur_resolx, cur_resoly, curr_rend_perc, cur_film_transp, cur_color_space, curr_color_mode, curr_file_format, curr_media_type)
+    restore_overlays(curr_overlays)
+    restore_shading(cur_shade, cur_studio_light, cur_color_type, cur_color_single, cur_light, cur_world_space_light, cur_cavity, cur_backg_type, cur_backg_color, cur_xray)
+    
+    # restore view
+    bpy.context.space_data.region_3d.view_matrix = view_matrix_copy
+    bpy.context.space_data.region_3d.view_perspective = view_persp_copy
+    
+    self.hand_idx = hand_idx
+    
+    if subsurf_mod:
+        body_temp.modifiers.remove(subsurf_mod)
+
+    
+def _set_markers_fingers_from_keypoints(self, side):    
+    
+    def find_3d_point(mat1, mat2, p1, p2):
+        p1_3d = mat1 @ (Vector((p1[0], p1[1], 0.0)) * (self.cam_ortho/2))
+        p2_3d = mat2 @ (Vector((p2[0], p2[1], 0.0)) * (self.cam_ortho/2))
+        d1 = get_axis(mat1, 2)
+        d2 = get_axis(mat2, 2)
+        solved_coords = get_closest_point_between_lines(p1_3d, d1, p2_3d, d2)
+        return solved_coords
+    
+    scn = bpy.context.scene
+    
+    # Create markers
+    fingers_base_list = ["thumb", "index", "middle", "ring", "pinky"]
+    if scn.arp_fingers_to_detect == 4:
+        fingers_base_list.remove("index")
+        
+    fingers_list = []
+    for fname in fingers_base_list:
+        for n in range(1, 5):
+            fingers_list.append(fname+str(n))
+    
+    for marker_name in fingers_list:
+        marker_obj = get_object(marker_name+'_loc')
+        if marker_obj == None:
+            _add_marker(marker_name, scn.arp_smart_sym)
+    
+    # Filter out invalid fingers detected (likely hidden)
+    dicts_list = []
+    for i in range(1, self.hand_idx+1):
+        dicts_list.append(self.keypoints['dict'+str(i)+side])    
+        
+    for kp_dict in dicts_list:
+        to_del = []
+        for finger in kp_dict:
+            if kp_dict[finger] == None:
+                finger_whole_name = finger[:-1]# remove the whole finger
+                if not finger_whole_name in to_del:
+                    to_del.append(finger_whole_name)
+                    
+        for finger_name in to_del:
+            for i in range(1, 5):
+                if finger_name+str(i) in kp_dict:
+                    del kp_dict[finger_name+str(i)]       
+    
+    
+    # Extract 3D position from 2D matches
+    # build match dict:  finger: [cam idx, coords], [cam idx, coords]...
+    fingers_2d_match = {}
+    print("Build 2D matches...")
+    
+    for fingername in fingers_list:
+        data = []# cam idx, point coords
+        for dico_i, dico in enumerate(dicts_list):
+            if fingername in dico:
+                data.append([dico_i+1, dico[fingername]])
+        
+        fingers_2d_match[fingername] = data
+    
+    # TODO: if less than 2 coords, cannot extract 3D coords
+    # handle errors...
+    
+    # compute 3d extraction
+    fingers_3d = {}
+    
+    def random_pairs(data):
+        method = 'full'
+        if method == 'full':
+            all_combos = list(combinations(data, 2))
+            random.shuffle(all_combos)
+            return all_combos[:len(data) - 1]
+            
+        elif method == 'first':        
+            # first coords are always first
+            first = data[0]
+            candidates = data[1:]
+            shuffled_candidates = candidates.copy()
+            random.shuffle(shuffled_candidates)
+            pairs = [(first, second) for second in shuffled_candidates[:len(data) - 1]]
+            return pairs
+        
+        
+    print("Extract 3D coords...")
+    for fingername in fingers_2d_match: 
+        #print(fingername)
+        if len(fingers_2d_match[fingername]) < 2:
+            print("Cannot extract 3D coords, single coord for:", fingername)
+            continue     
+        
+        pairs = random_pairs(fingers_2d_match[fingername])
+        points_samples = []
+        # evaluate pairs
+        for p in pairs:
+            #print("Pair:", p)
+            cam1_idx = p[0][0]-1# starts from 0 in cams_data[]
+            cam2_idx = p[1][0]-1
+            cam1_mat = self.cams_data_l[cam1_idx] if side == '_l' else self.cams_data_r[cam1_idx]
+            cam2_mat = self.cams_data_l[cam2_idx] if side == '_l' else self.cams_data_r[cam2_idx]
+            
+            coords1 = p[0][1]
+            coords2 = p[1][1]
+            # normalize coords 0:256 > -1:1
+            coords1_norm = [0,0]
+            coords2_norm = [0,0]
+            coords1_norm[0] = (coords1[0] - 128) / 128
+            coords1_norm[1] = -(coords1[1] - 128) / 128# invert Y
+            coords2_norm[0] = (coords2[0] - 128) / 128
+            coords2_norm[1] = -(coords2[1] - 128) / 128# invert Y
+            
+            point_3d = find_3d_point(cam1_mat, cam2_mat, coords1_norm, coords2_norm)
+            points_samples.append(point_3d)            
+        
+        # Average
+        #point_3d_sum = Vector((0,0,0))
+        #for ps in points_samples:
+        #    point_3d_sum += ps
+        #point_3d_sum = point_3d_sum/len(points_samples)
+        
+        # Median
+        point_3d_sum = np.median(points_samples, axis=0)  
+        
+        # Trimmed mean
+        #point_3d_sum = trimmed_mean(points_samples, 0.2)
+        
+        fingers_3d[fingername] = point_3d_sum
+        
+    self.success = True
+    
+    for fingername in fingers_list:        
+        marker_name = fingername+'_loc' if side == '_l' else fingername+'_loc_sym'
+        #print('marker_name', marker_name)
+        marker_obj = get_object(marker_name)
+        if not fingername in fingers_3d:
+            print("Finger AI detection failed:", fingername)
+            self.success = False
+            continue
+        marker_obj.location = fingers_3d[fingername]
+        
+    # AI detection failed
+    if not self.success:
+        for fingername in fingers_list:        
+            marker_name = fingername+'_loc' if side == '_l' else fingername+'_loc_sym'
+            marker_obj = get_object(marker_name)
+            if marker_obj:
+                delete_object(marker_obj)
+        
+        
+    else:# Refine result
+        # avoid collapsed markers in the center (low error threshold)
+        for fingername in fingers_list:
+            marker_name = fingername+'_loc' if side == '_l' else fingername+'_loc_sym'
+            hand_marker_name = 'hand_loc' if side == '_l' else 'hand_loc_sym'
+            marker_obj = get_object(marker_name)
+            if marker_obj.location[0] == 0.0:
+                marker_obj.location[0] = get_object(hand_marker_name).location[0]
+                
+        
+        straighten = True
+        
+        if straighten:
+            print("Straighten...")
+            # straighten
+            # get hand axis
+            index1_name = fingers_base_list[1]+'1_loc' if side == '_l' else fingers_base_list[1]+'1_loc_sym'#'index1_loc' if side == '_l' else 'index1_loc_sym'
+            index1_loc = get_object(index1_name).location.copy()
+            pinky1_name = 'pinky1_loc' if side == '_l' else 'pinky1_loc_sym'
+            pinky1_loc = get_object(pinky1_name).location.copy()
+            hand_axis = index1_loc - pinky1_loc
+            
+            
+            for fingername in fingers_base_list:
+                if 'thumb' in fingername:# skip thumb, can be more curled
+                    continue
+                    
+                # get finger dir
+                p1_name = fingername+'1_loc' if side == '_l' else fingername+'1_loc_sym'
+                p1 = get_object(p1_name)
+                p4_name = fingername+'4_loc' if side == '_l' else fingername+'4_loc_sym'
+                p4 = get_object(p4_name)
+                finger_dir = p4.location.copy() - p1.location.copy()
+                
+                # get finger normal
+                hand_normal = hand_axis.cross(finger_dir)
+                finger_normal = hand_normal.cross(finger_dir)
+                
+                for i in range(2, 4):
+                    px_name= fingername+str(i)+'_loc'
+                    if side == '_r':
+                        px_name += '_sym'
+                    px = get_object(px_name)
+                    print("Straighten", px_name)
+                    px.location = project_point_onto_plane(px.location, p1.location, finger_normal)
+                
+            
+    
+    print("Done.")
+    
+    
+def _screenshot_char(self):
+    body_temp = bpy.data.objects.get('body_temp')
+    scn = bpy.context.scene
+    
+    set_active_object(body_temp.name)
+    
+    clear_custom_normals(body_temp)
+
+    # get character dims
+    bbox_corners = [body_temp.matrix_world @ Vector(corner) for corner in body_temp.bound_box]
+
+    x1 = bbox_corners[0][0]
+    x2 = bbox_corners[4][0]
+    y1 = bbox_corners[0][1]
+    y2 = bbox_corners[6][1]
+    z1 = bbox_corners[0][2]
+    z2 = bbox_corners[2][2]
+    #print('y1', y1, 'y2', y2)
+    dim_x = abs(x2-x1)
+    dim_y = abs(y2-y1)
+    dim_z = abs(z2-z1)
+    #print(dim_x, dim_z)
+
+    self.larger_dim = dim_x if dim_x > dim_z else dim_z
+    self.larger_dimy = dim_y if dim_y > dim_z else dim_z
+    self.larger_dimtop = dim_y if dim_y > dim_x else dim_x
+    lower_y = y1 if y1 < y2 else y2
+    greater_x = x1 if x1 > x2 else x2
+    greater_z = z1 if z1 > z2 else z2
+    
+    self.midx = (x1+x2)*0.5
+    self.midy = (y1+y2)*0.5
+    self.midz = (z1+z2)*0.5
+    
+    # Setup screenshot settings
+    # create temp camera
+    cam_name = 'arp_cam_char'
+    camera_data = bpy.data.cameras.new(name=cam_name)
+    cam_obj = bpy.data.objects.new(cam_name, camera_data)
+    bpy.context.collection.objects.link(cam_obj)
+    bpy.context.scene.camera = cam_obj
+    cam_obj.location = (self.midx, lower_y - dim_y*10, self.midz)
+    cam_obj.rotation_euler = [math.pi/2, 0, 0]
+    cam_obj.data.type = 'ORTHO'
+    base_ortho_scale = self.larger_dim * self.margin
+    cam_obj.data.ortho_scale = base_ortho_scale
+    cam_obj.data.clip_end = 50000
+    
+    current_area = bpy.context.area
+
+    cur_shade, cur_studio_light, cur_color_type, cur_color_single, cur_light, cur_world_space_light, cur_cavity, cur_backg_type, cur_backg_color, cur_xray = switch_to_solid_shading()
+    curr_overlays = disable_overlays()
+    cur_resolx, cur_resoly, curr_rend_perc, cur_film_transp, cur_color_space, curr_color_mode, curr_file_format, curr_media_type = set_resol()
+            
+    #   switch to camera view
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            for space in area.spaces:
+                if space.type == 'VIEW_3D':
+                    space.region_3d.view_perspective = 'CAMERA'
+                    space.use_local_camera = False
+                    break
+    
+    
+    # Render screenshots
+    # front
+    picked_angles = [0]
+    
+    for i in range(1, scn.arp_smart_AI_body_samples+1):
+        img_name = 'front'+str(i)+'.jpg'
+        save_path = os.path.join(self.inf_path, img_name)
+        roty = 0
+        # samples jitter cam rot
+        if i == 2:
+            cam_obj.data.ortho_scale *= 1.1
+        if i != 1:# first is always straight
+            max_angle = 15
+            rand_angle = random.randint(-max_angle,max_angle)
+            iter = 1
+            while rand_angle in picked_angles and iter < 50:# new unique angle must be picked
+                rand_angle = random.randint(-max_angle,max_angle)
+                iter += 1
+                
+            picked_angles.append(rand_angle)
+            roty = math.radians(rand_angle)
+            cam_obj.rotation_euler[1] = roty
+            
+        self.front_samples_rot.append(roty)
+        
+        bpy.ops.render.opengl(write_still=False)
+        bpy.data.images['Render Result'].save_render(filepath=bpy.path.abspath(save_path))
+    
+    
+    # side
+    picked_offsets = [0.0]
+    cam_obj.location = (greater_x + dim_x*10, self.midy, self.midz)
+    cam_obj.rotation_euler = [math.pi/2, 0, math.pi/2]
+    cam_obj.data.ortho_scale = self.larger_dimy * self.margin
+    side_samples = 1# scn.arp_smart_AI_body_samples
+    
+    for i in range(1, side_samples+1):
+        img_name = 'side'+str(i)+'.jpg'
+        save_path = os.path.join(self.inf_path, img_name)
+        
+        offset_y = 0.0
+        # jitter cam Y
+        
+        if i != 1:# first is always straight
+            max_offset = cam_obj.data.ortho_scale / 5
+            print('max_offset', max_offset)
+            rand_offset = random.uniform(-max_offset, max_offset)
+            iter = 1
+            while rand_offset in picked_offsets and iter < 50:# new unique offset must be picked
+                rand_offset = random.uniform(-max_offset, max_offset)
+                iter += 1
+                
+            picked_offsets.append(rand_offset)
+            offset_y = rand_offset
+            print('offset_y', offset_y)
+            cam_obj.location[1] = self.midy + offset_y
+            
+        self.side_samples_offset.append(offset_y)
+        
+        bpy.ops.render.opengl(write_still=False)
+        bpy.data.images['Render Result'].save_render(filepath=bpy.path.abspath(save_path))
+        
+    
+    # top
+    cam_obj.location = (self.midx, self.midy, greater_z + dim_z*10)
+    cam_obj.rotation_euler = [0, 0, 0]
+    cam_obj.data.ortho_scale = self.larger_dimtop * self.margin
+    top_samples = 1# not yet implemented
+    
+    for i in range(1, top_samples+1):
+        img_name = 'top'+str(i)+'.jpg'
+        save_path = os.path.join(self.inf_path, img_name)
+        self.top_samples_rot.append(0.0)
+        bpy.ops.render.opengl(write_still=False)
+        bpy.data.images['Render Result'].save_render(filepath=bpy.path.abspath(save_path))
+    
+    
+    # delete temp cam
+    bpy.data.objects.remove(cam_obj)
+    
+    # restore settings
+    restore_resol(cur_resolx, cur_resoly, curr_rend_perc, cur_film_transp, cur_color_space, curr_color_mode, curr_file_format, curr_media_type)
+    restore_overlays(curr_overlays)          
+    restore_shading(cur_shade, cur_studio_light, cur_color_type, cur_color_single, cur_light, cur_world_space_light, cur_cavity, cur_backg_type, cur_backg_color, cur_xray)  
+            
+    # restore front view
+    bpy.ops.view3d.view_axis(type='FRONT')
+    bpy.context.space_data.region_3d.view_perspective = 'ORTHO'
+    
+
+def _set_markers_from_keypoints(self):
+    scn = bpy.context.scene
+    scn.arp_smart_sym = False
+    
+    # Create markers
+    for marker_name in ['root', 'neck', 'chin', 'shoulder', 'hand', 'foot', 'thigh', 'knee', 'hand_tip', 'elbow', 'head_tip']:
+        #if marker_name == 'elbow':#backward-compatibility
+        #    if not 'left_elbow' in self.dicts_side:# not sure what this means, comment out for now
+        #        continue
+                
+        marker_obj = get_object(marker_name+'_loc')
+        if marker_obj == None:
+            _add_marker(marker_name, False)
+    
+    # remap location
+    x1_scaled = self.midx + (-self.larger_dim/2)*self.margin
+    x2_scaled = self.midx + (self.larger_dim/2)*self.margin
+    z1_scaled = self.midz + (-self.larger_dim/2)*self.margin
+    z2_scaled = self.midz + (self.larger_dim/2)*self.margin
+    dim_x_scaled = abs(x1_scaled-x2_scaled)
+    dim_z_scaled = abs(z1_scaled-z2_scaled)
+  
+    ratio_x = (dim_x_scaled/256)
+    ratio_z = (dim_z_scaled/256)
+    
+    def translate_marker_name(n):
+        translated_name = n
+        if 'ankle' in n:
+            translated_name = n.replace('ankle', 'foot')
+        elif 'wrist' in n:
+            translated_name = n.replace('wrist', 'hand')
+        elif 'pelvis' in n:
+            translated_name = n.replace('pelvis', 'root')
+        return translated_name
+        
+        
+    def get_marker_name(n):
+        marker_name = n+'_loc'      
+        if kp_name.startswith('left_'):
+            marker_name = n.replace('left_','')+'_loc'
+        elif kp_name.startswith('right_'):
+            marker_name = n.replace('right_','')+'_loc_sym'
+        return marker_name
+    
+    # Frontal locations  
+    front_samples_locs = {}
+    
+    #   evaluate sampled positions
+    for i in range(0, scn.arp_smart_AI_body_samples):
+        dict_front = self.dicts_front[i]
+        roty = self.front_samples_rot[i]
+            
+        for kp_name in dict_front:
+            #print('kp_name', kp_name, dict_front[kp_name])
+            loc_x = x1_scaled + (dict_front[kp_name][0] * ratio_x)
+            loc_z = z2_scaled - (dict_front[kp_name][1] * ratio_z)
+            
+            if i == 0:# straight
+                front_samples_locs[kp_name] = [(loc_x, loc_z)]            
+            else:
+                # counter transforms
+                #   scale
+                loc_x = self.midx + (loc_x - self.midx) * 1.1
+                loc_z = self.midz + (loc_z - self.midz) * 1.1
+                #   rot
+                corrected_loc = rotate_point(Vector((loc_x, 0, loc_z)), roty, Vector((0, 1, 0)), Vector((self.midx, 0, self.midz)))
+                loc_x, loc_z = corrected_loc[0], corrected_loc[2]
+                front_samples_locs[kp_name].append((loc_x, loc_z))
+        
+    
+    #   average samples locations
+    for kp_name in front_samples_locs:        
+        sum_x = 0.0
+        sum_z = 0.0
+        for loc_x, loc_z in front_samples_locs[kp_name]:
+            #print('  ', round(loc_x, 2), round(loc_z, 2))
+            sum_x += loc_x
+            sum_z += loc_z
+       
+        av_loc_x = sum_x / len(front_samples_locs[kp_name])
+        av_loc_z = sum_z / len(front_samples_locs[kp_name])
+
+        #print('  average:', round(av_loc_x, 2), round(av_loc_z, 2))
+        
+        # set marker
+        translated_name = translate_marker_name(kp_name)
+        marker_name = get_marker_name(translated_name)
+        marker_obj = get_object(marker_name)
+        marker_obj.location = [av_loc_x, 0.0, av_loc_z]
+            
+    for kp_name in front_samples_locs:
+        # align vertically thighs with pelvis
+        # thighs keypoints are only used for X loc
+        translated_name = translate_marker_name(kp_name)
+        marker_name = get_marker_name(translated_name)
+        if marker_name.startswith('thigh'):
+            marker_obj = get_object(marker_name)
+            marker_obj.location[2] = get_object('root_loc').location[2]    
+        
+        
+    # Side locations
+    y1_scaled = self.midy + (-self.larger_dimy/2) * self.margin
+    y2_scaled = self.midy + (self.larger_dimy/2) * self.margin   
+    dim_y_scaled = abs(y1_scaled-y2_scaled)  
+    ratio_y = (dim_y_scaled/256)
+    
+    z1_scaled = self.midz + (-self.larger_dimy/2) * self.margin
+    z2_scaled = self.midz + (+self.larger_dimy/2) * self.margin
+    dim_z_scaled = abs(z1_scaled-z2_scaled)
+    ratio_z = (dim_z_scaled/256)
+    
+    side_samples_locs = {}
+    
+    #   evaluate sampled positions
+    side_samples = 1# scn.arp_smart_AI_body_samples
+    
+    for i in range(0, side_samples):
+        dict_side = self.dicts_side[i]
+        offsety = self.side_samples_offset[i]
+            
+        for kp_name in dict_side:
+            loc_y = y1_scaled + (dict_side[kp_name][0] * ratio_y)
+            loc_z = z2_scaled - (dict_side[kp_name][1] * ratio_z)
+            
+            if i == 0:# straight
+                side_samples_locs[kp_name] = [(loc_y, loc_z)]            
+            else:
+                # counter transforms
+                loc_y = loc_y + offsety
+                side_samples_locs[kp_name].append((loc_y, loc_z))
+        
+        
+    #   average samples locations
+    for kp_name in side_samples_locs:        
+        sum_y = 0.0
+        sum_z = 0.0
+        for loc_y, loc_z in side_samples_locs[kp_name]:
+            sum_y += loc_y
+            sum_z += loc_z
+        
+        av_loc_y = sum_y / len(side_samples_locs[kp_name])
+        av_loc_z = sum_z / len(side_samples_locs[kp_name])
+        
+        # set marker
+        translated_name = translate_marker_name(kp_name)
+        marker_name = get_marker_name(translated_name)
+        marker_obj = get_object(marker_name)
+        marker_obj.location[1] = av_loc_y
+        
+        # Average with front Z    
+        if kp_name in ['head_tip', 'knee', 'ankle']:# or 'pelvis' in kp_name or 'thigh' in kp_name:
+            front_z = marker_obj.location[2]
+            marker_obj.location[2] = (front_z + av_loc_z) * 0.5
+            #print("Average", kp_name, "Z. Before:", front_z, "After:", marker_obj.location[2])          
+        
+        '''
+        # force knee in the middle
+        # comment out for now, should not be necessary anymore with the latest refined model files, 
+        # and is more prone to error since knees are not always perfectly mid distance
+        if 'knee' in kp_name:
+            marker_thigh = get_object('thigh_loc')
+            marker_thigh_z = marker_thigh.location[2]
+            marker_foot = get_object('foot_loc')
+            marker_foot_z = marker_foot.location[2]
+            marker_obj.location[2] = (marker_thigh_z + marker_foot_z) * 0.5
+        '''
+            
+    bpy.ops.transform.translate(value=(0, 0, 0), orient_type='NORMAL')# trigger update
+    
+    # get arm angle
+    shoulder_loc = get_object('shoulder_loc').matrix_world.to_translation()
+    hand_loc = get_object('hand_loc').matrix_world.to_translation()
+    arm_angle = (shoulder_loc - hand_loc).angle(Vector((0,0,1)))
+    arm_angle = math.degrees(arm_angle)
+    print('Arm angle:', round(arm_angle, 2))
+    
+    
+    # Top locations
+    x1_scaled = self.midx + (-self.larger_dimtop/2)*self.margin
+    x2_scaled = self.midx + (self.larger_dimtop/2)*self.margin
+    dim_x_scaled = abs(x1_scaled-x2_scaled)
+    ratio_x = (dim_x_scaled/256)
+    y1_scaled = self.midy + (-self.larger_dimtop/2)*self.margin
+    y2_scaled = self.midy + (self.larger_dimtop/2)*self.margin   
+    dim_y_scaled = abs(y1_scaled-y2_scaled)  
+    ratio_y = (dim_y_scaled/256)
+    
+    
+    if arm_angle > 20:# skip top evaluation if vertical arms
+        
+        # evaluate sampled positions
+        top_samples_locs = {}
+        top_samples = 1# scn.arp_smart_AI_body_samples
+        
+        for i in range(0, top_samples):
+            dict_top = self.dicts_top[i]
+            roty = self.top_samples_rot[i]
+                
+            for kp_name in dict_top:
+                if dict_top[kp_name] == None or -1 in dict_top[kp_name]:
+                    print('Top predict failed:', kp_name)
+                    continue
+                
+                loc_x = x1_scaled + (dict_top[kp_name][0] * ratio_x)
+                loc_y = y2_scaled - (dict_top[kp_name][1] * ratio_y)
+              
+                if i == 0:# straight
+                    top_samples_locs[kp_name] = [(loc_x, loc_y)]            
+                else:# not yet implemented
+                    # counter transforms
+                    #   scale
+                    loc_x = self.midx + (loc_x - self.midx) * 1.1
+                    loc_y = self.midy + (loc_y - self.midy) * 1.1
+                    #   rot
+                    corrected_loc = rotate_point(Vector((loc_x, loc_y, 0.0)), roty, Vector((0, 0, 1)), Vector((self.midx, self.midy, 0)))
+                    loc_x, loc_y = corrected_loc[0], corrected_loc[1]
+                    top_samples_locs[kp_name].append((loc_x, loc_y))
+                
+        
+        # average samples locations
+        for kp_name in top_samples_locs:        
+            sum_x = 0.0
+            sum_y = 0.0
+            for loc_x, loc_y in top_samples_locs[kp_name]:
+                sum_x += loc_x
+                sum_y += loc_y
+            
+            av_loc_x = sum_x / len(top_samples_locs[kp_name])
+            av_loc_y = sum_y / len(top_samples_locs[kp_name])
+            
+            # set marker
+            translated_name = translate_marker_name(kp_name)
+            marker_name = get_marker_name(translated_name)
+            marker_obj = get_object(marker_name)
+            
+            marker_obj.location[1] = av_loc_y
+            
+            # average X with front view
+            if kp_name in ['wrist', 'hand_tip', 'elbow']:
+                marker_obj.location[0] = (marker_obj.location[0] + av_loc_x) * 0.5
+            
+            # average Y with side view
+            marker_obj.location[1] = (marker_obj.location[1] + av_loc_y) * 0.5    
+           
+           
+    # --Refine result --
+    
+    # Avoid inverted knee (may lead to offset the knee out of the mesh though -blame the character design not complying with IK constraints
+    # Note: The knee is automatically corrected in match_ref() too. 
+    # but this initial correction makes the knee closer to its final position for a better preview,
+    # and the thigh joint is adjusted too, mitigating the problem
+    for side in ['.l']:# TODO asymmetrical support
+        suff = '' if side == '.l' else '_sym'
+        thigh_marker = get_object('thigh_loc'+suff)
+        foot_marker = get_object('foot_loc'+suff)
+        knee_marker = get_object('knee_loc'+suff)
+        
+        leg_mid = (thigh_marker.location + foot_marker.location) / 2
+        
+        if leg_mid[1] < knee_marker.location[1]:
+            print("Inverted knee, fix...", leg_mid)
+            safe_offset = (knee_marker.location - thigh_marker.location).magnitude * 0.05
+            correc_vec = (leg_mid[1]-knee_marker.location[1])
+            
+            # first try to apply the fix to both thigh and knee
+            thigh_marker.location[1] -= (correc_vec - safe_offset*0.5) * 0.5
+            knee_marker.location[1] += (correc_vec - safe_offset*0.5) * 0.5
+            
+            leg_mid = (thigh_marker.location + foot_marker.location) / 2
+            
+            # if still inverted, tweak the knee only
+            if leg_mid[1] < knee_marker.location[1]:                
+                print("  second fix", leg_mid)
+                correc_vec = (leg_mid[1]-knee_marker.location[1])
+                knee_marker.location[1] += correc_vec - safe_offset
+        
+        
+    
+    # Wrist: ensure it's inside the mesh, to fix precision issues
+    body_temp = get_object('body_temp')
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    obj_eval = depsgraph.objects.get(body_temp.name, None)
+    body_depth = body_temp.dimensions[1]    
+    
+    for side in ['.l']:# TODO asymmetrical support
+        suff = '' if side == '.l' else '_sym'
+        success = False
+        rotate_dir = 1
+        trials = 0
+        max_trials = 40
+        
+        hand_marker = get_object('hand_loc'+suff)
+        shoulder_marker = get_object('shoulder_loc'+suff)
+        hand_marker_backup = hand_marker.location.copy()
+        
+        wrist_invalid = False
+        wrist_fixed = False
+        
+        while success == False:
+            ray_origin = hand_marker.location + vectorize3([0, -body_depth*5, 0])
+            ray_dir = vectorize3([0, body_depth*50, 0])
+            success, hit, normal, index = obj_eval.ray_cast(ray_origin, ray_dir)
+
+            if success == False:
+                wrist_invalid = True
+                if trials > max_trials:
+                    if rotate_dir == 1:
+                        trials = 0
+                        rotate_dir = -1
+                        hand_marker.location = hand_marker_backup
+                    else:                        
+                        hand_marker.location = hand_marker_backup
+                        break
+                    
+                # rotate                
+                hand_marker.location = rotate_point(hand_marker.location, math.radians(0.5)*rotate_dir, Vector((0,1,0)), shoulder_marker.location)
+                trials += 1
+                
+            else:# fixed
+                if wrist_invalid:
+                    wrist_fixed = True                
+            
+                
+        if wrist_invalid:
+            print("Wrist marker was invalid. Fixing trials:", trials, 'Dir', rotate_dir)
+            if wrist_fixed:
+                wloc = [round(hand_marker.location[0],3), round(hand_marker.location[1], 3), round(hand_marker.location[2], 3)]
+                print("Fixed. New wrist loc:", wloc)
+            else:
+                print("Could not fix the wrist marker, restore to original location")
+                
+                
+    # Ankle: ensure it's inside the mesh, to fix precision issues 
+    for side in ['.l']:# TODO asymmetrical support
+        suff = '' if side == '.l' else '_sym'
+        success = False
+        rotate_dir = 1
+        trials = 0
+        max_trials = 40
+        
+        foot_marker = get_object('foot_loc'+suff)
+        thigh_marker = get_object('thigh_loc'+suff)
+        foot_marker_backup = foot_marker.location.copy()
+        
+        foot_invalid = False
+        foot_fixed = False
+        
+        while success == False:
+            ray_origin = foot_marker.location + vectorize3([0, -body_depth*5, 0])
+            ray_dir = vectorize3([0, body_depth*50, 0])
+            success, hit, normal, index = obj_eval.ray_cast(ray_origin, ray_dir)
+
+            if success == False:
+                foot_invalid = True
+                if trials > max_trials:
+                    if rotate_dir == 1:
+                        trials = 0
+                        rotate_dir = -1
+                        foot_marker.location = foot_marker_backup
+                    else:                        
+                        foot_marker.location = foot_marker_backup
+                        break
+                    
+                # rotate                
+                foot_marker.location = rotate_point(foot_marker.location, -math.radians(0.5)*rotate_dir, Vector((0,1,0)), thigh_marker.location)
+                trials += 1
+                
+            else:# fixed
+                if foot_invalid:
+                    foot_fixed = True                
+            
+                
+        if foot_invalid:
+            print("Foot marker was invalid. Fixing trials:", trials, 'Dir', rotate_dir)
+            if foot_fixed:
+                wloc = [round(foot_marker.location[0],3), round(foot_marker.location[1], 3), round(foot_marker.location[2], 3)]
+                print("Fixed. New foot loc:", wloc)
+            else:
+                print("Could not fix the foot marker, restore to original location")
+        
+                
+    
+    # enable markers fx
+    cleanup(None)        
+    bpy.ops.id.markers_fx(active=True)
+    
 
 def _match_ref(self):
 
@@ -1658,7 +3536,7 @@ def _match_ref(self):
         # add shrinkwrap mod
         if len(arp_facial_setup.modifiers) > 0:
             arp_facial_setup.modifiers.remove(arp_facial_setup.modifiers[0])
-        mod = arp_facial_setup.modifiers.new("shrinkwrap", 'SHRINKWRAP')
+        mod = arp_facial_setup.modifiers.new('shrinkwrap', 'SHRINKWRAP')
         mod.target = get_object(b_name)
         mod.wrap_method = 'PROJECT'
         mod.use_project_x = False
@@ -1668,71 +3546,101 @@ def _match_ref(self):
         mod.use_negative_direction = False
 
         bpy.ops.object.convert(target='MESH')
-
-        # Eyeball loc
-        eyeb1 = get_object(scn.arp_eyeball_name)
-        unhide_object(eyeb1)
-        set_active_object(eyeb1.name)
-
-        bpy.ops.object.mode_set(mode='EDIT')
-
-            # make sure to unhide all verts
-        bpy.ops.mesh.reveal()
-        bpy.ops.mesh.select_all(action='DESELECT')
-
-            #find the vert the more on the left
-        left_vert = None
-        _mesh = bmesh.from_edit_mesh(eyeb1.data)
-        for vert in _mesh.verts:
-            if left_vert == None:
-                left_vert = vert
-            else:
-                if vert.co[0] > left_vert.co[0]:
-                    left_vert = vert
-
-        left_vert.select = True
-        bpy.ops.mesh.select_linked(delimit=set())
-        scn.tool_settings.transform_pivot_point = 'BOUNDING_BOX_CENTER'
-        bpy.ops.view3d.snap_cursor_to_selected()
-
-        eyeball_loc = scn.cursor.location.copy()
-
         bpy.ops.object.mode_set(mode='OBJECT')
-        hide_object(eyeb1)
-
-
-        eyeball_loc_right = None
-
-        if scn.arp_eyeball_type == "SEPARATE" and scn.arp_smart_sym == False:# right eyeball if set, non-mirror mode
-            eyeb2 = get_object(scn.arp_eyeball_name_right)
-            unhide_object(eyeb2)
-            bpy.ops.object.select_all(action='DESELECT')
-            set_active_object(eyeb2.name)
+        
+        # Eyeball loc
+        if scn.arp_smart_eyes:
+            eyeb1 = get_object(scn.arp_eyeball_name)
+            unhide_object(eyeb1)
+            set_active_object(eyeb1.name)
 
             bpy.ops.object.mode_set(mode='EDIT')
 
-            # make sure to unhide all verts
+            #   make sure to unhide all verts
             bpy.ops.mesh.reveal()
             bpy.ops.mesh.select_all(action='DESELECT')
 
-            #find the vert the more on the right
-            right_vert = None
-            _mesh = bmesh.from_edit_mesh(eyeb2.data)
+            #   find the vert the more on the left
+            left_vert = None
+            _mesh = bmesh.from_edit_mesh(eyeb1.data)
             for vert in _mesh.verts:
-                if right_vert == None:
-                    right_vert = vert
+                if left_vert == None:
+                    left_vert = vert
                 else:
-                    if vert.co[0] < right_vert.co[0]:
-                        right_vert = vert
+                    if vert.co[0] > left_vert.co[0]:
+                        left_vert = vert
+                        
+            #   for hemispheres, find the back vert
+            back_left_vert = None
+            if scn.arp_smart_eye_shape == 'HEMISPHERE':            
+                back_left_vert = None
+                for vert in _mesh.verts:
+                    if back_left_vert == None:
+                        back_left_vert = vert
+                    else:
+                        if vert.co[1] > back_left_vert.co[1]:
+                            back_left_vert = vert
 
-            right_vert.select = True
+            left_vert.select = True
             bpy.ops.mesh.select_linked(delimit=set())
             scn.tool_settings.transform_pivot_point = 'BOUNDING_BOX_CENTER'
             bpy.ops.view3d.snap_cursor_to_selected()
-
-            eyeball_loc_right = scn.cursor.location.copy()
+            
+            if scn.arp_smart_eye_shape == 'HEMISPHERE': 
+                scn.cursor.location[1] = (eyeb1.matrix_world @  back_left_vert.co)[1]
+                
+            eyeball_loc = scn.cursor.location.copy()
 
             bpy.ops.object.mode_set(mode='OBJECT')
+            hide_object(eyeb1)
+
+
+            eyeball_loc_right = None
+
+            if scn.arp_eyeball_type == 'SEPARATE' and scn.arp_smart_sym == False:# right eyeball if set, non-mirror mode
+                eyeb2 = get_object(scn.arp_eyeball_name_right)
+                unhide_object(eyeb2)
+                bpy.ops.object.select_all(action='DESELECT')
+                set_active_object(eyeb2.name)
+
+                bpy.ops.object.mode_set(mode='EDIT')
+
+                # make sure to unhide all verts
+                bpy.ops.mesh.reveal()
+                bpy.ops.mesh.select_all(action='DESELECT')
+
+                #find the vert the more on the right
+                right_vert = None
+                _mesh = bmesh.from_edit_mesh(eyeb2.data)
+                for vert in _mesh.verts:
+                    if right_vert == None:
+                        right_vert = vert
+                    else:
+                        if vert.co[0] < right_vert.co[0]:
+                            right_vert = vert
+                            
+                #   for hemispheres, find the back vert
+                back_right_vert = None
+                if scn.arp_smart_eye_shape == 'HEMISPHERE':            
+                    back_right_vert = None
+                    for vert in _mesh.verts:
+                        if back_right_vert == None:
+                            back_right_vert = vert
+                        else:
+                            if vert.co[1] > back_right_vert.co[1]:
+                                back_right_vert = vert
+
+                right_vert.select = True
+                bpy.ops.mesh.select_linked(delimit=set())
+                scn.tool_settings.transform_pivot_point = 'BOUNDING_BOX_CENTER'
+                bpy.ops.view3d.snap_cursor_to_selected()
+                
+                if scn.arp_smart_eye_shape == 'HEMISPHERE': 
+                    scn.cursor.location[1] = (eyeb2.matrix_world @ back_right_vert.co)[1]
+
+                eyeball_loc_right = scn.cursor.location.copy()
+
+                bpy.ops.object.mode_set(mode='OBJECT')
 
         set_active_object(rig_name)
 
@@ -1760,6 +3668,12 @@ def _match_ref(self):
         used_sides.append(".r")
 
         
+    # save the chin loc position to use with the "Use Chin" binding option
+    chin_loc = get_object("chin_loc")
+    bpy.context.active_object.data["arp_chin_loc"] = chin_loc.location[2]
+    bpy.context.active_object.data['arp_chin_pos_vec'] = chin_loc.location.copy()
+    print('    arp_chin_pos_vec',chin_loc.location)
+    
     if scn.arp_smart_type == 'FACIAL':
         head_ref = get_edit_bone("head_ref.x")
         head_ref.head = rig_matrix_world_inv @ get_object("head_loc_auto").location
@@ -1775,22 +3689,22 @@ def _match_ref(self):
             # Feet
             print("\n    matching feet", used_side, "...")
             
-            init_selection("foot_ref"+used_side)
+            #init_selection('foot_ref'+used_side)
             foot = get_edit_bone("foot_ref"+used_side)
-            foot.head = rig_matrix_world_inv @ get_object("ankle_loc" + used_side + "_auto").location
-            foot.tail = rig_matrix_world_inv @ get_object("toes_start" + used_side +  "_auto").location
-            
-            bpy.ops.armature.calculate_roll(type='GLOBAL_POS_Z')
+            foot.head = rig_matrix_world_inv @ get_object('ankle_loc'+used_side+'_auto').location
+            foot.tail = rig_matrix_world_inv @ get_object('toes_start'+used_side+'_auto').location
+            align_bone_z_axis(foot, Vector((0,0,1)))
+            #bpy.ops.armature.calculate_roll(type='GLOBAL_POS_Z')
             
             if scn.arp_smart_sym:
                 mirror_hack()
 
-            init_selection("toes_ref"+used_side)
-            toes_ref = get_edit_bone("toes_ref"+used_side)
-            toes_ref.head = rig_matrix_world_inv @ get_object("toes_start" + used_side + "_auto").location
-            toes_ref.tail = rig_matrix_world_inv @ get_object("toes_end" + used_side + "_auto").location
-            
-            bpy.ops.armature.calculate_roll(type='GLOBAL_POS_Z')
+            #init_selection('toes_ref'+used_side)
+            toes_ref = get_edit_bone('toes_ref'+used_side)
+            toes_ref.head = rig_matrix_world_inv @ get_object('toes_start'+used_side+'_auto').location
+            toes_ref.tail = rig_matrix_world_inv @ get_object('toes_end'+used_side+'_auto').location
+            align_bone_z_axis(toes_ref, Vector((0,0,1)))
+            #bpy.ops.armature.calculate_roll(type='GLOBAL_POS_Z')
             
             if scn.arp_smart_sym:
                 mirror_hack()
@@ -1800,9 +3714,9 @@ def _match_ref(self):
             if used_side == ".r":
                 foot_dir = scn.arp_foot_dir_r
 
-            init_selection("foot_bank_01_ref"+used_side)
-            foot_bank_01_ref = get_edit_bone("foot_bank_01_ref"+used_side)
-            bank_right = get_object("bank_left_loc" + used_side + "_auto").location
+            init_selection('foot_bank_01_ref'+used_side)
+            foot_bank_01_ref = get_edit_bone('foot_bank_01_ref'+used_side)
+            bank_right = get_object('bank_left_loc'+used_side+'_auto').location
             
             foot_bank_01_ref.head = rig_matrix_world_inv @ bank_right
             foot_bank_01_ref.tail = foot_bank_01_ref.head + (foot_dir.normalized() * get_edit_bone('foot_ref'+used_side).length*0.2)
@@ -1863,9 +3777,8 @@ def _match_ref(self):
                 cur_vec = leg_ref.head - leg_midpoint
                 cur_vec[2] = 0.0
                 global_y_vec = Vector((0, -1, 0))
-
                 signed_cur_angle = signed_angle(cur_vec, global_y_vec, leg_axis)
-                print("  IK correc angle:", degrees(signed_cur_angle))
+                print("    IK correc angle:", degrees(signed_cur_angle))
                 
                 offset_vec = -leg_midpoint
                 offset_knee = leg_ref.head + offset_vec
@@ -1888,7 +3801,19 @@ def _match_ref(self):
 
             if scn.arp_smart_sym:
                 mirror_hack()
-
+                
+            #   roll
+            init_selection("leg_ref"+used_side)
+            bpy.ops.armature.calculate_roll(type='POS_Z')
+            thigh_ref = get_edit_bone("thigh_ref"+used_side)
+            leg_ref = get_edit_bone("leg_ref"+used_side)
+            align_bone_x_axis(thigh_ref, leg_ref.x_axis)
+            
+            if used_side.endswith(".r"):
+                leg_ref.roll += radians(-180)
+                thigh_ref.roll += radians(-180)
+            
+            
             if get_edit_bone("bot_bend_ref" + used_side):
                 init_selection("bot_bend_ref"+used_side)
                 bot_bend_ref = get_edit_bone("bot_bend_ref"+used_side)
@@ -1907,6 +3832,14 @@ def _match_ref(self):
 
         # Spine
         print("\n    matching spine...")        
+        spine_count = 3
+        root_ref = get_data_bone('root_ref.x')
+        if root_ref:
+            spine_count = root_ref['spine_count']
+        
+        if spine_count != 3:
+            select_edit_bone(root_ref.name, mode=1)
+            auto_rig.set_spine(count=3, grid_align=True, bottom=False)
         
         root_ref = get_edit_bone("root_ref.x")
         root_auto = get_object("root_loc_auto").location
@@ -1928,6 +3861,7 @@ def _match_ref(self):
 
         
         for used_side in used_sides:
+            used_marker_side = '' if used_side == '.l' else '_sym'
             # Arms
             print("\n    matching arms", used_side, "...")            
             
@@ -1939,34 +3873,88 @@ def _match_ref(self):
             if scn.arp_smart_sym:
                 mirror_hack()
 
-                #arm
+            #   arm
             init_selection("arm_ref"+used_side)
             arm_ref = get_edit_bone("arm_ref"+used_side)
-            arm_ref.tail = rig_matrix_world_inv @ get_object("elbow_loc" + used_side + "_auto").location
+            arm_ref.tail = rig_matrix_world_inv @ get_object("elbow_loc"+used_side+"_auto").location
             if scn.arp_smart_sym:
                 mirror_hack()
 
-                #forearm
+            #   forearm
             init_selection("forearm_ref"+used_side)
             forearm_ref = get_edit_bone("forearm_ref"+used_side)
-            forearm_ref.tail = rig_matrix_world_inv @ get_object("hand_loc" + used_side + "_auto").location
+            forearm_ref.tail = rig_matrix_world_inv @ get_object("hand_loc"+used_side+"_auto").location
             if scn.arp_smart_sym:
                 mirror_hack()
-
-                #hand
+            
+            #   make sure the elbow is pointing backward for IK
+            arm_ref = get_edit_bone("arm_ref"+used_side)
+            midpoint = (arm_ref.head + forearm_ref.tail) * 0.5
+            #print("forearm_ref.head", forearm_ref.head[1])
+            #print("midpoint", midpoint)
+            
+            if forearm_ref.head[1] < midpoint[1]:
+                print("    The elbow is pointing forward, change that...")
+                print("    Old:", forearm_ref.head[1])
+             
+                # auto-align elbow position with global Y axis to ensure IK pole vector is physically correct
+                arm_axis = forearm_ref.tail - arm_ref.head
+                cur_vec = forearm_ref.head - midpoint
+                cur_vec[2] = 0.0
+                global_y_vec = Vector((0, 1, 0))
+                signed_cur_angle = signed_angle(cur_vec, global_y_vec, arm_axis)
+                print("    IK correc angle:", degrees(signed_cur_angle))                
+                
+                offset_elbow = forearm_ref.head - midpoint
+                # rotate in world origin space
+                rot_mat = Matrix.Rotation(signed_cur_angle, 4, arm_axis.normalized())
+                elbow_rotated = rot_mat @ offset_elbow
+                # bring back to original space
+                offset_vec = -midpoint
+                elbow_rotated = elbow_rotated -offset_vec
+                
+                # apply the correction to both the elbow (-Y) and arm (+Y) to improve the result
+                forearm_ref.head = elbow_rotated
+                print("    New:", forearm_ref.head[1])
+                
+            if scn.arp_smart_sym:
+                mirror_hack()
+                
+            #   roll
+            init_selection("forearm_ref"+used_side)
+            bpy.ops.armature.calculate_roll(type='NEG_Z')
+            
+            arm_ref = get_edit_bone("arm_ref"+used_side)
+            forearm_ref = get_edit_bone("forearm_ref"+used_side)
+            align_bone_x_axis(arm_ref, forearm_ref.x_axis)
+            
+            if used_side.endswith(".r"):
+                arm_ref.roll += radians(-180)
+                forearm_ref.roll += radians(-180)
+            
+            #   hand
             init_selection("hand_ref"+used_side)
             hand_ref = get_edit_bone("hand_ref"+used_side)
 
-                #check if fingers are detected
-            if scn.arp_fingers_to_detect != 0 and get_object("middle_bot" + used_side + "_auto") != None:
-                hand_ref.tail = hand_ref.head + (rig_matrix_world_inv @ get_object("middle_bot" + used_side + "_auto").location - hand_ref.head)*0.6
-
+            #   check if fingers are detected
+            middle_pos = None
+            if scn.arp_fingers_to_detect != 0:
+                auto_name = "middle_bot"+used_side+"_auto"
+                marker_name = "middle1_loc"+used_marker_side
+                
+                if get_object(auto_name):
+                    middle_pos = get_object(auto_name)                
+                elif get_object(marker_name):
+                    middle_pos = get_object(marker_name)
+                
+            if middle_pos:
+                hand_ref.tail = hand_ref.head + (rig_matrix_world_inv @ middle_pos.location - hand_ref.head)*0.6
             else:
                 forearm_ref = get_edit_bone("forearm_ref"+used_side)
                 hand_ref.tail = hand_ref.head + ((forearm_ref.tail - forearm_ref.head)/3)
 
-                #hand roll
-                # get hand/x-axis angle
+            #   hand roll
+            #   get hand/x-axis angle
             hand_vec = hand_ref.y_axis
             hand_vec[1] = 0
 
@@ -1975,17 +3963,20 @@ def _match_ref(self):
             left_pos = None
             right_pos = None
 
-            if get_object("pinky_root" + used_side + "_auto"):
-                left_pos = get_object("pinky_root" + used_side + "_auto").location
-            elif get_object("ring_root" + used_side + "_auto"):
-                left_pos = get_object("ring_root" + used_side + "_auto").location
+            if get_object("pinky_root"+used_side+"_auto"):
+                left_pos = get_object("pinky_root"+used_side+"_auto").location.copy()
+            elif get_object("ring_root"+used_side+"_auto"):
+                left_pos = get_object("ring_root"+used_side+"_auto").location.copy()
+            elif get_object("pinky1_loc"+used_marker_side):
+                left_pos = get_object("pinky1_loc"+used_marker_side).location.copy()
 
-            if get_object("index_root" + used_side + "_auto"):
-                right_pos = get_object("index_root" + used_side + "_auto").location
-
+            if get_object("index_root"+used_side+"_auto"):
+                right_pos = get_object("index_root"+used_side+"_auto").location
+            elif get_object("index1_loc"+used_marker_side):
+                right_pos = get_object("index1_loc"+used_marker_side).location.copy()
 
             if left_pos and right_pos:
-                hand_loc = get_object("hand_loc" + used_side + "_auto").location
+                hand_loc = get_object("hand_loc"+used_side+"_auto").location
                 hand_normal = cross(left_pos-right_pos, hand_loc-right_pos).normalized()
                 if (used_side == ".r"):
                     hand_normal *= -1
@@ -2004,7 +3995,7 @@ def _match_ref(self):
             # FINGERS --------------------------------------------
             print("    matching fingers", used_side, "...")
 
-            select_hands= ['hand_ref' + used_side]
+            select_hands= ['hand_ref'+used_side]
             if len(used_sides) == 1:# set opposite side too if mirror is enabled
                 select_hands.append('hand_ref.r')
 
@@ -2022,11 +4013,11 @@ def _match_ref(self):
                     auto_rig.set_fingers(True, True, False, False, False)
               
                 elif scn.arp_fingers_to_detect == 3:
-                    auto_rig.set_fingers(True, True, True, False, False)
+                    auto_rig.set_fingers(True, False, False, True, True)
 
                 # If fingers to detect is set to 4, enable all fingers but pinky
                 elif scn.arp_fingers_to_detect == 4:
-                    auto_rig.set_fingers(True, True, True, True, False)
+                    auto_rig.set_fingers(True, False, True, True, True)
               
                 elif scn.arp_fingers_to_detect == 5:
                     auto_rig.set_fingers(True, True, True, True, True)
@@ -2034,7 +4025,7 @@ def _match_ref(self):
 
             # make list of fingers bones
             finger_bones = []
-            init_selection("hand_ref" + used_side)
+            init_selection("hand_ref"+used_side)
             bpy.ops.armature.select_similar(type='CHILDREN')
 
             for bone in bpy.context.active_object.data.edit_bones:
@@ -2050,8 +4041,8 @@ def _match_ref(self):
 
                 return None
 
-            #reset fingers transforms if it's the second time the button is pressed
-            if len(scn.arp_fingers_init_transform) > 0:
+            # reset fingers transforms if it's the second time the button is pressed
+            if len(scn.arp_fingers_init_transform):
                 for bone_name in finger_bones:
                     current_bone = get_edit_bone(bone_name)
                     try:
@@ -2063,7 +4054,7 @@ def _match_ref(self):
                     except:
                         pass
 
-            #save initial fingers transform in the property collection if it's the first time the button is pressed
+            # save initial fingers transform in the property collection if it's the first time the button is pressed
             for bone_name in finger_bones:
                 current_bone = get_edit_bone(bone_name)
                 # is the bone already saved?
@@ -2072,93 +4063,131 @@ def _match_ref(self):
                 if b == None:
                     item = scn.arp_fingers_init_transform.add()
                     item.name = bone_name
-                    item.head = current_bone.head
-                    item.tail = current_bone.tail
+                    item.head = current_bone.head.copy()
+                    item.tail = current_bone.tail.copy()
                     item.roll = current_bone.roll
 
 
             #    root
             fingers = ["thumb", "index", "middle", "ring", "pinky"]
+            if scn.arp_fingers_to_detect == 4:
+                fingers.remove("index")
 
-            fingers_root = ["index1_base_ref"+used_side, "middle1_base_ref"+used_side, "ring1_base_ref"+used_side, "pinky1_base_ref"+used_side]
+            fingers_root = []#["index1_base_ref"+used_side, "middle1_base_ref"+used_side, "ring1_base_ref"+used_side, "pinky1_base_ref"+used_side]
+            for n in fingers:
+                if n == "thumb":
+                    continue
+                fingers_root.append(n+"1_base_ref"+used_side)
 
             found_fingers_loc = False
 
             if scn.arp_fingers_to_detect != 0:
-                auto_root = ["index_root" +  used_side + "_auto", "middle_root" + used_side + "_auto", "ring_root" + used_side + "_auto", "pinky_root" + used_side + "_auto"]
+                
+                # Legacy Metacarpals
+                if scn.arp_smart_fingers_engine == 'LEGACY':
+                    auto_root = []#["index_root"+ used_side+"_auto", "middle_root"+used_side+"_auto", "ring_root"+used_side+"_auto", "pinky_root"+used_side+"_auto"]
+                    for n in fingers:
+                        if n == "thumb":
+                            continue
+                        auto_root.append(n+'_root'+used_side+'_auto')
 
-                #front view for correct roll from view
-                bpy.ops.view3d.view_axis(type='FRONT')
+                    # front view for correct roll from view
+                    bpy.ops.view3d.view_axis(type='FRONT')
 
-                for i in range(0, len(fingers_root)):
-                    #if the detection marker exists
-                    if get_object(auto_root[i]) != None:
+                    for i in range(0, len(fingers_root)):
+                        #if the detection marker exists
+                        if get_object(auto_root[i]) != None:
 
-                        found_fingers_loc = True
+                            found_fingers_loc = True
 
-                        init_selection(fingers_root[i])
-                        bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones[fingers_root[i]].bone
-                        root_ref = get_edit_bone(fingers_root[i])
-                        root_ref.head = rig_matrix_world_inv @ get_object(auto_root[i]).location
-                        root_ref.tail = rig_matrix_world_inv @ get_object(fingers[i+1]+"_bot" + used_side + "_auto").location
-
-                        bpy.ops.object.mode_set(mode='POSE')
-                        bpy.ops.pose.select_all(action='DESELECT')
-                        bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones[fingers_root[i]].bone
-                        bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones["hand_ref" + used_side].bone
-                        bpy.ops.object.mode_set(mode='EDIT')
-                        bpy.ops.armature.calculate_roll(type='ACTIVE')
-
-                        if scn.arp_smart_sym:
-                            mirror_hack()
+                            init_selection(fingers_root[i])
+                            bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones[fingers_root[i]].bone
+                            root_ref = get_edit_bone(fingers_root[i])
+                            root_ref.head = rig_matrix_world_inv @ get_object(auto_root[i]).location.copy()
+                            root_ref.tail = rig_matrix_world_inv @ get_object(fingers[i+1]+'_bot'+used_side+'_auto').location.copy()
+                            align_bone_z_axis(root_ref, get_edit_bone('hand_ref'+used_side).z_axis)
+                         
+                            if scn.arp_smart_sym:
+                                mirror_hack()
 
 
-                for f in range(0,5):
+                for f in range(0, scn.arp_fingers_to_detect):
                     bpy.ops.armature.select_all(action='DESELECT')
 
-                    #if the detection marker exists
-                    if get_object(fingers[f]+"_bot" + used_side + "_auto") != None:
+                    # if the detection marker exists
+                    if (scn.arp_smart_fingers_engine == 'LEGACY' and get_object(fingers[f]+'_bot'+used_side+'_auto') != None) or scn.arp_smart_fingers_engine == 'AI':
 
                         found_fingers_loc = True
 
-                        #bot
-                        init_selection(fingers[f]+"1_ref"+used_side)
-                        finger_bot = get_edit_bone(fingers[f]+"1_ref"+used_side)
+                        # phal1
+                        finger1_name = fingers[f]+"1_ref"+used_side
+                        init_selection(finger1_name)
+                        finger_bot = get_edit_bone(finger1_name)
 
-                        if f != 0: #not thumb
-                            finger_bot.head = rig_matrix_world_inv @ get_object(fingers[f]+"_bot" + used_side + "_auto").location
-                            finger_bot.tail = rig_matrix_world_inv @ get_object(fingers[f]+"_phal_2" + used_side + "_auto").location
+                        if f != 0:# not thumb
+                            phal1_marker_name = fingers[f]+'_bot'+used_side+'_auto'
+                            if scn.arp_smart_fingers_engine == 'AI':
+                                phal1_marker_name = fingers[f]+'1_loc'
+                                if used_side == '.r':
+                                    phal1_marker_name += '_sym'
+                         
+                            phal1_marker = get_object(phal1_marker_name)
+                            
+                            phal2_name = fingers[f]+"_phal_2"+used_side+"_auto"
+                            if scn.arp_smart_fingers_engine == 'AI':
+                                phal2_name = fingers[f]+'2_loc'
+                                if used_side == '.r':
+                                    phal2_name += '_sym'
+                                    
+                            phal2_marker = get_object(phal2_name)
+                                
+                            finger_bot.head = rig_matrix_world_inv @ phal1_marker.location
+                            finger_bot.tail = rig_matrix_world_inv @ phal2_marker.location
 
-                            # roll
-                            bpy.ops.object.mode_set(mode='POSE')
-                            bpy.ops.pose.select_all(action='DESELECT')
-                            bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones[fingers[f]+"1_ref"+used_side].bone
-                            bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones["hand_ref" + used_side].bone
-                            bpy.ops.object.mode_set(mode='EDIT')
-                            bpy.ops.armature.calculate_roll(type='ACTIVE')
+                            # roll                           
+                            align_bone_x_axis(get_edit_bone(finger1_name), get_edit_bone('hand_ref'+used_side).x_axis)
 
 
                         else:# thumb
-                            finger_bot.head = rig_matrix_world_inv @ get_object(fingers[f]+"_root" + used_side + "_auto").location
-                            finger_bot.tail = rig_matrix_world_inv @ get_object(fingers[f]+"_phal_2" + used_side + "_auto").location
+                            thumb1_name = fingers[f]+"_root"+used_side+"_auto"
+                            if scn.arp_smart_fingers_engine == 'AI':
+                                thumb1_name = fingers[f]+'1_loc'
+                                if used_side == '.r':
+                                    thumb1_name += '_sym'
+                            
+                            thumb2_name = fingers[f]+"_phal_2"+used_side+"_auto"
+                            if scn.arp_smart_fingers_engine == 'AI':
+                                thumb2_name = fingers[f]+'2_loc'
+                                if used_side == '.r':
+                                    thumb2_name += '_sym'
+                            
+                            thumb1_marker = get_object(thumb1_name)
+                            thumb2_marker = get_object(thumb2_name)
+                            
+                            finger_bot.head = rig_matrix_world_inv @ thumb1_marker.location
+                            finger_bot.tail = rig_matrix_world_inv @ thumb2_marker.location
                             bpy.ops.armature.calculate_roll(type='GLOBAL_NEG_Y')
 
                         if scn.arp_smart_sym:
                             mirror_hack()
 
-                        #phal1
-                        init_selection(fingers[f] + "2_ref" + used_side)
-                        finger_phal_1 = get_edit_bone(fingers[f] + "2_ref" + used_side)
-                        finger_phal_1.tail = rig_matrix_world_inv @ get_object(fingers[f] + "_phal_1" + used_side + "_auto").location
+                        # phal2
+                        phal2_eb_name = fingers[f]+"2_ref"+used_side
+                        init_selection(phal2_eb_name)
+                        phal2_eb = get_edit_bone(phal2_eb_name)
+                        
+                        phal_marker_name = fingers[f]+"_phal_1"+used_side+"_auto"
+                        if scn.arp_smart_fingers_engine == 'AI':
+                                phal_marker_name = fingers[f]+'3_loc'
+                                if used_side == '.r':
+                                    phal_marker_name += '_sym'
+                        
+                        phal_marker = get_object(phal_marker_name)
+                        phal2_eb.tail = rig_matrix_world_inv @ phal_marker.location
 
                         # roll
-                        if f != 0: #not thumb
-                            bpy.ops.object.mode_set(mode='POSE')
-                            bpy.ops.pose.select_all(action='DESELECT')
-                            bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones[fingers[f]+"2_ref"+used_side].bone
-                            bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones["hand_ref" + used_side].bone
-                            bpy.ops.object.mode_set(mode='EDIT')
-                            bpy.ops.armature.calculate_roll(type='ACTIVE')
+                        if f != 0: #not thumb                            
+                            align_bone_x_axis(get_edit_bone(phal2_eb_name), get_edit_bone('hand_ref'+used_side).x_axis)
 
                         else:# thumb
                             bpy.ops.armature.calculate_roll(type='GLOBAL_NEG_Y')
@@ -2167,90 +4196,157 @@ def _match_ref(self):
                             mirror_hack()
 
 
-                        #phal2
-                        init_selection(fingers[f]+"3_ref"+used_side)
-                        finger_phal_2 = get_edit_bone(fingers[f]+"3_ref"+used_side)
-                        finger_phal_2.tail = rig_matrix_world_inv @ get_object(fingers[f]+"_top" + used_side + "_auto").location
+                        #phal3
+                        phal3_eb_name = fingers[f]+"3_ref"+used_side
+                        init_selection(phal3_eb_name)
+                        phal3_eb = get_edit_bone(phal3_eb_name)
+                        
+                        phal_marker_name = fingers[f]+"_top" + used_side + "_auto"
+                        if scn.arp_smart_fingers_engine == 'AI':
+                                phal_marker_name = fingers[f]+'4_loc'
+                                if used_side == '.r':
+                                    phal_marker_name += '_sym'
+                        
+                        phal_marker = get_object(phal_marker_name)                        
+                        phal3_eb.tail = rig_matrix_world_inv @ phal_marker.location
 
                         # roll
-                        if f != 0: #not thumb
-                            bpy.ops.object.mode_set(mode='POSE')
-                            bpy.ops.pose.select_all(action='DESELECT')
-                            bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones[fingers[f]+"3_ref"+used_side].bone
-                            bpy.context.active_object.data.bones.active = bpy.context.active_object.pose.bones["hand_ref" + used_side].bone
-                            bpy.ops.object.mode_set(mode='EDIT')
-                            bpy.ops.armature.calculate_roll(type='ACTIVE')
-
+                        if f != 0: #not thumb                           
+                            align_bone_x_axis(get_edit_bone(phal3_eb_name), get_edit_bone('hand_ref'+used_side).x_axis)
                         else:
                             bpy.ops.armature.calculate_roll(type='GLOBAL_NEG_Y')
 
                         if scn.arp_smart_sym:
                             mirror_hack()
+                            
+                        # AI metacarpals
+                        if scn.arp_smart_fingers_engine == 'AI' and f != 0:
+                        
+                            # front view for correct roll from view
+                            bpy.ops.view3d.view_axis(type='FRONT')
+                            
+                            ref_name = fingers[f]+'1_base_ref'+used_side
+                            init_selection(ref_name)
+                            hand_ref = get_edit_bone('hand_ref'+used_side)
+                            phal1_ref = get_edit_bone(finger1_name)
+                            #print('phal1_ref', phal1_ref)
+                            bpy.context.active_object.data.bones.active = get_data_bone(ref_name)
+                            metacarp_ref = get_edit_bone(ref_name)
+                            
+                            metacarp_ref.head = hand_ref.head + (phal1_ref.head-hand_ref.head)*0.4
+                            # unsqueeze width
+                            thumb_ref = get_edit_bone('thumb1_ref'+used_side)
+                            dir_fac = 1 if f < 3 else -1
+                            fac = 0.8
+                            if f == 2 or f == 3:
+                                fac = 0.2
+                            if f == 4:
+                                fac = 0.2
+                            metacarp_ref.head += (thumb_ref.head - metacarp_ref.head) * 0.5 * dir_fac * fac
+                            
+                            align_bone_z_axis(metacarp_ref, hand_ref.z_axis)                            
+                         
+                            if scn.arp_smart_sym:
+                                mirror_hack()
+                        
 
-            if scn.arp_fingers_enable and (scn.arp_fingers_to_detect == 0 or not found_fingers_loc):
-                # Offset all finger bones close the hand bone
+            hand_ref_eb = get_edit_bone('hand_ref'+used_side)
+            
+            if scn.arp_fingers_enable:                
+                # Fingers are enabled, but no fingers were detected
+                # move all finger bones close the hand bone
+                if (scn.arp_fingers_to_detect == 0 or not found_fingers_loc):
                     # calculate offset vector
-                rig_scale = get_object(rig_name).scale[0]
-                offset_vec = (get_edit_bone("hand_ref" + used_side).tail - get_edit_bone("index1_base_ref"+used_side).head)*rig_scale
+                    rig_scale = get_object(rig_name).scale[0]
+                    finger_ref_name = 'index'
+                    if scn.arp_fingers_to_detect == 4:
+                        finger_ref_name = 'middle'
+                    if scn.arp_fingers_to_detect == 3:
+                        finger_ref_name = 'ring'
+                    offset_vec = (hand_ref_eb.tail - get_edit_bone(finger_ref_name+'1_base_ref'+used_side).head)*rig_scale
 
-                for b in finger_bones:
-                    get_edit_bone(b).select = True
+                    for b in finger_bones:
+                        get_edit_bone(b).select = True
 
-                bpy.ops.object.mode_set(mode='POSE')
-                bpy.ops.object.mode_set(mode='EDIT')
-                bpy.ops.transform.translate(value=(offset_vec), constraint_axis=(False, False, False), orient_type='GLOBAL', mirror=True)
+                    bpy.ops.object.mode_set(mode='POSE')
+                    bpy.ops.object.mode_set(mode='EDIT')
+                    bpy.ops.transform.translate(value=(offset_vec), constraint_axis=(False, False, False), orient_type='GLOBAL', mirror=True)
 
-                bpy.ops.armature.select_all(action='DESELECT')
+                    bpy.ops.armature.select_all(action='DESELECT')
+            else:
+                # Fingers are disabled
+                # the hand bone tail should match the hand_tip marker loc
+                hand_tip_name = "hand_tip_loc" if used_side == '.l' else "hand_tip_loc_sym"
+                hand_tip_marker = get_object(hand_tip_name)
+                if hand_tip_marker:
+                    if scn.arp_smart_depth and hand_tip_marker:# only evaluates the hand_tip marker if depth is enabled, wrong results otherwise
+                        hand_ref_eb.tail = rig_matrix_world_inv @ hand_tip_marker.location                 
 
 
     # Facial
     if get_object("arp_facial_setup"):
         print("\n    matching smart facial...")
-        #disable x-axis mirror edit
+        
+        # disable x-axis mirror edit
         bpy.context.active_object.data.use_mirror_x = False
         facial_markers = ard.facial_markers
 
         # enable ears and facial
-        suffix, found_base = auto_rig.get_next_dupli_id(".l", "ears")
-        if not found_base:
-            auto_rig.set_ears(2, side_arg=".l")
-        if not get_edit_bone("c_jawbone.x"):
-            # make sure the head_ref bone is selected before setting the facial
-            get_edit_bone("head_ref.x").select = True
-            auto_rig.set_facial(enable=True)
+        if scn.arp_smart_ears:
+            suffix, found_base = auto_rig.get_next_dupli_id(".l", "ears")
+            if not found_base:
+                auto_rig.set_ears(2, side_arg=".l")
+        
+        # set facial
+        head_ref = get_edit_bone("head_ref.x")
+        head_ref.select = True
+        
+        auto_rig.set_facial(enable=True, eyebrow_l_enabled=scn.arp_smart_eyebrows, eyebrow_r_enabled=scn.arp_smart_eyebrows,
+            noses_enabled=scn.arp_smart_nose, cheeks_enabled=scn.arp_smart_cheeks, eye_l_enabled=scn.arp_smart_eyes, eye_r_enabled=scn.arp_smart_eyes,
+            mouth_enabled=scn.arp_smart_mouth, teeth_enabled=scn.arp_smart_teeth, tongue_enabled=scn.arp_smart_tongue, chins_enabled=scn.arp_smart_chin)
 
+        eyelids_pos_list = []
+        eyelid_pos = None
+        
         # match
+        _eyeball_loc = None
+        
         for bone in facial_markers:
             _side = bone[-2:]
             e_bone = get_edit_bone(bone[:-2]+"_ref"+_side)
-
-            cur_eyeball_loc = eyeball_loc
-            if _side == ".r" and scn.arp_smart_sym == False and scn.arp_eyeball_type == "SEPARATE":# right eyeball loc
-                cur_eyeball_loc = eyeball_loc_right
+            
+            cur_eyeball_loc = None
+            
+            if scn.arp_smart_eyes:
+                cur_eyeball_loc = eyeball_loc
+                if _side == ".r" and scn.arp_smart_sym == False and scn.arp_eyeball_type == "SEPARATE":# right eyeball loc
+                    cur_eyeball_loc = eyeball_loc_right
 
             if e_bone:
                 e_bone_vec = e_bone.tail - e_bone.head
                 v_index = facial_markers[bone]
                 vert_loc = arp_facial_setup.matrix_world @ arp_facial_setup.data.vertices[v_index].co
 
-                if 'eyelid' in bone:
+                if 'eyelid' in bone and scn.arp_smart_eyes:
                     _eyeball_loc = cur_eyeball_loc.copy()
                     _eyeball_loc[0] = abs(cur_eyeball_loc[0]) if _side == ".l" else -abs(cur_eyeball_loc[0])
                     e_bone.head = rig_matrix_world_inv @ _eyeball_loc
                     e_bone.tail = rig_matrix_world_inv @ vert_loc
                     align_bone_x_axis(e_bone, Vector((-1,0,0)))
-
-                elif 'ear_01' in bone:
+                    eyelids_pos_list.append(e_bone.head.copy())
+                
+                elif 'ear_01' in bone and scn.arp_smart_ears:
                     vert_ear2 = arp_facial_setup.matrix_world @ arp_facial_setup.data.vertices[facial_markers['ear_02'+_side]].co
                     mid = (vert_ear2 + vert_loc)*0.5
                     e_bone.head = rig_matrix_world_inv @ vert_loc
                     e_bone.tail = rig_matrix_world_inv @ mid
 
-                elif 'ear_02' in bone:
+                elif 'ear_02' in bone and scn.arp_smart_ears:
                     vert_ear1 = arp_facial_setup.matrix_world @ arp_facial_setup.data.vertices[facial_markers['ear_01'+_side]].co
                     mid = (vert_ear1 + vert_loc)*0.5
                     e_bone.head = rig_matrix_world_inv @ mid
-                    e_bone.tail = rig_matrix_world_inv @ vert_loc
+                    e_bone.tail = rig_matrix_world_inv @ vert_loc                    
+             
                 else:
                     e_bone.head = rig_matrix_world_inv @ vert_loc
                     e_bone.tail = e_bone.head + e_bone_vec
@@ -2259,253 +4355,295 @@ def _match_ref(self):
                     push_vec = (e_bone.head - e_bone.tail)
                     e_bone.head += push_vec*0.5
                     e_bone.tail += push_vec*0.5
-
+        
+        sum = None
+        mid_pos = None
+        
+        for pos in eyelids_pos_list:
+            if sum == None:
+                sum = pos
+            else:
+                sum += pos
+        if sum:
+            mid_pos = sum/len(eyelids_pos_list)
+        else:
+            mid_pos = (head_ref.head + head_ref.tail)*0.5
+        
         for _side in sides:
-            cur_eyeball_loc = eyeball_loc
 
-            if _side == ".r" and scn.arp_smart_sym == False and scn.arp_eyeball_type == "SEPARATE":# right eyeball loc
-                cur_eyeball_loc = eyeball_loc_right
-
-            #eyebrow master
-            eyebrow_full = get_edit_bone("eyebrow_full_ref"+_side)
-            eybrow_02 = get_edit_bone("eyebrow_02_ref"+_side)
-            eyebrow_full.head = eybrow_02.tail + (eybrow_02.tail - eybrow_02.head) * 2
-            eyebrow_full.tail = eyebrow_full.head + (eybrow_02.tail - eybrow_02.head)
+            #eyebrow master        
+            if scn.arp_smart_eyebrows:            
+                eyebrow_full = get_edit_bone("eyebrow_full_ref"+_side)
+                if eyebrow_full:
+                    eybrow_02 = get_edit_bone("eyebrow_02_ref"+_side)
+                    eyebrow_full.head = eybrow_02.tail + (eybrow_02.tail - eybrow_02.head) * 2
+                    eyebrow_full.tail = eyebrow_full.head + (eybrow_02.tail - eybrow_02.head)
 
             #main eyelids
-            if _side == ".r":# and not scn.arp_smart_sym == False and not scn.arp_eyeball_type == "SEPARATE":
-                _eyeball_loc[0] = -abs(cur_eyeball_loc[0])
-            else:
-                _eyeball_loc[0] = abs(cur_eyeball_loc[0])
+            if scn.arp_smart_eyes:
+                cur_eyeball_loc = eyeball_loc
 
-            eyeball_loc_final = rig_matrix_world_inv @ _eyeball_loc
+                if _side == ".r" and scn.arp_smart_sym == False and scn.arp_eyeball_type == "SEPARATE":# right eyeball loc
+                    cur_eyeball_loc = eyeball_loc_right
+                
+                if _side == ".r":# and not scn.arp_smart_sym == False and not scn.arp_eyeball_type == "SEPARATE":
+                    _eyeball_loc[0] = -abs(cur_eyeball_loc[0])
+                else:
+                    _eyeball_loc[0] = abs(cur_eyeball_loc[0])
 
-            #  top
-            eyelid_top = get_edit_bone('eyelid_top_ref'+_side)
-            eyelid_top.head = eyeball_loc_final
-            eyelid_top.tail = get_edit_bone('eyelid_top_02_ref'+_side).tail
-            eyelid_top.tail[0] = eyelid_top.head[0]
-            eyelid_top.roll = math.radians(180)
+                eyeball_loc_final = rig_matrix_world_inv @ _eyeball_loc
+
+                #  top
+                eyelid_top = get_edit_bone('eyelid_top_ref'+_side)
+                eyelid_top.head = eyeball_loc_final
+                eyelid_top.tail = get_edit_bone('eyelid_top_02_ref'+_side).tail
+                eyelid_top.tail[0] = eyelid_top.head[0]
+                eyelid_top.roll = math.radians(180)
 
                 #bottom
-            eyelid_bot = get_edit_bone("eyelid_bot_ref"+_side)
-            eyelid_bot.head = eyeball_loc_final
-            eyelid_bot.tail = get_edit_bone("eyelid_bot_02_ref"+_side).tail
-            eyelid_bot.tail[0] = eyelid_bot.head[0]
-            eyelid_bot.roll = math.radians(180)
+                eyelid_bot = get_edit_bone("eyelid_bot_ref"+_side)
+                eyelid_bot.head = eyeball_loc_final
+                eyelid_bot.tail = get_edit_bone("eyelid_bot_02_ref"+_side).tail
+                eyelid_bot.tail[0] = eyelid_bot.head[0]
+                eyelid_bot.roll = math.radians(180)
 
-            #eye offset
-            eye_offset = get_edit_bone("eye_offset_ref"+_side)
-            eye_offset.head = eyeball_loc_final
-            eye_offset.tail = eyelid_bot.tail
-            eye_offset.tail[2] = eye_offset.head[2]
-            align_bone_x_axis(eye_offset, Vector((-1,0,0)))
-
-            #lips corner mini
-            lips_corner = get_edit_bone("lips_smile_ref"+_side)
-            lips_cm = get_edit_bone("lips_corner_mini_ref" + _side)
-            lips_cm.head = lips_corner.head
-            lips_cm.tail = lips_corner.head + (lips_corner.tail - lips_corner.head)*0.5
+                #eye offset
+                eye_offset = get_edit_bone("eye_offset_ref"+_side)
+                eye_offset.head = eyeball_loc_final
+                eye_offset.tail = eyelid_bot.tail
+                eye_offset.tail[2] = eye_offset.head[2]
+                align_bone_x_axis(eye_offset, Vector((-1,0,0)))
+            
+            if scn.arp_smart_mouth:
+                #lips corner mini
+                lips_corner = get_edit_bone("lips_smile_ref"+_side)
+                lips_cm = get_edit_bone("lips_corner_mini_ref" + _side)
+                lips_cm.head = lips_corner.head
+                lips_cm.tail = lips_corner.head + (lips_corner.tail - lips_corner.head)*0.5
+                
         # end for _side in sides
 
         #nose 01 tweak
         nose_01 = get_edit_bone("nose_01_ref.x")
-        nose_01.head[1] = ((rig_matrix_world_inv @ _eyeball_loc)[1] + nose_01.tail[1])*0.5
-        nose_01.tail = nose_01.head + (nose_01.tail - nose_01.head)*0.3
-
-        #nose 02
-        nose_02 = get_edit_bone("nose_02_ref.x")
-        nose_02.head = nose_01.tail
-        nose_02.tail = nose_02.head + (nose_01.tail - nose_01.head)
-
-        #nose 03 tweak
-        nose_03 = get_edit_bone("nose_03_ref.x")
-        transf_vec = nose_03.head - nose_03.tail
-        nose_03.head += transf_vec*0.5
-        nose_03.tail += transf_vec*0.5
-
-        #lips roll
-        lips_roll_t = get_edit_bone("lips_roll_top_ref.x")
-        lips_top = get_edit_bone("lips_top_ref.x")
-        initial_vec = lips_roll_t.tail - lips_roll_t.head
-        mid_vec = (nose_02.tail + lips_top.head) * 0.5
-        lips_roll_t.head = mid_vec
-        lips_roll_t.tail = initial_vec + lips_roll_t.head
-
-        lips_roll_b = get_edit_bone("lips_roll_bot_ref.x")
-        lips_bot = get_edit_bone("lips_bot_ref.x")
-        initial_vec = lips_roll_b.tail - lips_roll_b.head
-        mid_vec = (get_edit_bone("chin_01_ref.x").head + lips_bot.head) * 0.5
-        lips_roll_b.head = mid_vec
-        lips_roll_b.head[1] = lips_roll_t.head[1]
-        lips_roll_b.tail = initial_vec + lips_roll_b.head
-
-        #jaw
-        jaw_bone = get_edit_bone("jaw_ref.x")
-        head_ref = get_edit_bone("head_ref.x")
-        chin_02_ref = get_edit_bone("chin_02_ref.x")
-        jaw_bone.head = head_ref.head + (head_ref.tail - head_ref.head)*0.2 + (chin_02_ref.head - head_ref.head)*0.2
-        jaw_bone.tail = chin_02_ref.head
-
-        # Tongue        
-        tongue_names = ["tong_01_ref.x", "tong_02_ref.x", "tong_03_ref.x"]
-        nose_lips_point = (lips_top.head + nose_01.tail) * 0.5
-        transf_vec = nose_lips_point - (get_edit_bone("teeth_top_ref.x").tail)
-        transf_vec += (jaw_bone.head - lips_top.head) * 0.2
+        if nose_01:
+            nose_03 = get_edit_bone("nose_03_ref.x")
             
-        tongue_object = get_object(scn.arp_tongue_name)
-        
-        tongue_raycasted = False
-        
-        if tongue_object:# get exact tongue positions from object raycast
-            unhide_object(tongue_object)
-            tongue_object.hide_select = False
-            bounds = get_object_boundaries(tongue_object)
-            depsgraph = bpy.context.evaluated_depsgraph_get()
-            obj_eval = depsgraph.objects.get(tongue_object.name, None)
-            y_fac = [0.1, 0.5, 0.85]
-            
-            for idx in range(0, 3):
-                print('  Raycast tongue #'+str(idx)+'...')                
-                y = bounds['back'] + (bounds['front']-bounds['back'])*y_fac[idx]
-                x = (bounds['left']+bounds['right'])*0.5
-                z = bounds['top'] + (bounds['top']-bounds['bottom'])*0.5
-                ray_origin = tongue_object.matrix_world.inverted() @ Vector((x, y, z))
-                ray_dir = tongue_object.matrix_world.inverted() @ vectorize3([0.0, 0.0, -10.0])
-                ray_inc = ray_dir.normalized() * 0.0001
-                result, loc, normal, index = obj_eval.ray_cast(ray_origin, ray_dir)
-
-                hit_front = None
+            if scn.arp_smart_eyes:
+                nose_01.head[1] = ((rig_matrix_world_inv @ _eyeball_loc)[1] + nose_01.tail[1])*0.5
+            else:
+                nose_01.head[1] = nose_03.head[1]
                 
-                if result:        
-                    hit_front = loc.copy()
-                    have_hit = True
-                    last_hit = loc                
-                    while have_hit:#iterate if multiples faces layers
-                        have_hit = False
-                        result, loc, normal, index = obj_eval.ray_cast(last_hit+ray_inc, ray_dir)
-                        if result:
-                            have_hit = True
-                            last_hit = loc
-                    hit_back = last_hit
-                else:
-                    print('    Tongue raycast'+str(idx)+' failed!')
+            nose_01.tail = nose_01.head + (nose_01.tail - nose_01.head)*0.3
 
-                if hit_front:
-                    tongue_raycasted = True
-                    hit_center = (hit_front + hit_back) * 0.5
-                    tongue_xx_loc = obj_eval.matrix_world @ hit_center# convert to world space
-                    tongue_xx_loc = rig_matrix_world_inv @ tongue_xx_loc# convert to armature space
-                    tongue_xx = get_edit_bone(tongue_names[idx])
-                    move_vec = (tongue_xx_loc - tongue_xx.head)
-                    tongue_xx.head += move_vec
-                    if idx == 2:
-                        tongue_xx.tail += move_vec
+            #nose 02
+            nose_02 = get_edit_bone("nose_02_ref.x")
+            nose_02.head = nose_01.tail
+            nose_02.tail = nose_02.head + (nose_01.tail - nose_01.head)
+
+            #nose 03 tweak
+            transf_vec = nose_03.head - nose_03.tail
+            nose_03.head += transf_vec*0.5
+            nose_03.tail += transf_vec*0.5
+
+        if scn.arp_smart_mouth:
+            #lips roll
+            lips_roll_t = get_edit_bone("lips_roll_top_ref.x")
+            lips_top = get_edit_bone("lips_top_ref.x")
+            initial_vec = lips_roll_t.tail - lips_roll_t.head
+            if nose_01:        
+                mid_pos = (nose_02.tail + lips_top.head) * 0.5
+            lips_roll_t.head = mid_pos
+            lips_roll_t.tail = initial_vec + lips_roll_t.head
+
+            lips_roll_b = get_edit_bone("lips_roll_bot_ref.x")
+            lips_bot = get_edit_bone("lips_bot_ref.x")
+            initial_vec = lips_roll_b.tail - lips_roll_b.head
             
-        if tongue_raycasted == False:# no tongue_object, or raycast failed, then average tongue position
-            for name in tongue_names:
-                if 'tong_03' in name:
-                    get_edit_bone(name).head += transf_vec
-                    get_edit_bone(name).tail += transf_vec
-                else:
-                    get_edit_bone(name).head += transf_vec
+            pos = rig.matrix_world.inverted() @ vectorize3(rig.data["arp_chin_pos_vec"])
+            chin_01_ref = get_edit_bone("chin_01_ref.x")
+            if chin_01_ref:
+                pos = chin_01_ref.head
+            mid_vec = (pos + lips_bot.head) * 0.5
+            lips_roll_b.head = mid_vec
+            lips_roll_b.head[1] = lips_roll_t.head[1]
+            lips_roll_b.tail = initial_vec + lips_roll_b.head
+
+            #jaw
+            jaw_bone = get_edit_bone("jaw_ref.x")
+            head_ref = get_edit_bone("head_ref.x")
+            chin_02_ref = get_edit_bone("chin_02_ref.x")
+            chin_pos = rig.matrix_world.inverted() @ vectorize3(rig.data["arp_chin_pos_vec"])
+            
+            if chin_02_ref:
+                chin_pos = chin_02_ref.head.copy()
+            
+            jaw_bone.head = head_ref.head + (head_ref.tail - head_ref.head)*0.2 + (chin_pos - head_ref.head)*0.2
+            jaw_bone.tail = chin_pos
+ 
+
+            # Tongue
+            if nose_01:
+                nose_lips_point = (lips_top.head + nose_01.tail) * 0.5
+            else:
+                nose_lips_point = (lips_top.head + mid_pos) * 0.5
+                
+            if scn.arp_smart_teeth:
+                transf_vec = nose_lips_point - (get_edit_bone("teeth_top_ref.x").tail)
+            else:
+                transf_vec = nose_lips_point - Vector((jaw_bone.tail[0], jaw_bone.tail[1], jaw_bone.head[2]))
+            transf_vec += (jaw_bone.head - lips_top.head) * 0.2
+                
+            tongue_object = get_object(scn.arp_tongue_name)
+            
+            tongue_raycasted = False
+            
+            if scn.arp_smart_tongue:
+                tongue_names = ["tong_01_ref.x", "tong_02_ref.x", "tong_03_ref.x"]
+                
+                if tongue_object:# get exact tongue positions from object raycast
+                    unhide_object(tongue_object)
+                    tongue_object.hide_select = False
+                    bounds = get_object_boundaries(tongue_object)
+                    depsgraph = bpy.context.evaluated_depsgraph_get()
+                    obj_eval = depsgraph.objects.get(tongue_object.name, None)
+                    y_fac = [0.1, 0.5, 0.85]
                     
-        # Teeth
-        teeth_names = ["teeth_top_ref.l", "teeth_top_ref.x", "teeth_top_ref.r", "teeth_bot_ref.l", "teeth_bot_ref.x", "teeth_bot_ref.r"]   
-        
-        teeth_object = get_object(scn.arp_teeth_name)
-        if teeth_object:# get exact teeth positions from object
-            unhide_object(teeth_object)
-            teeth_object.hide_select = False       
-            bounds = get_object_boundaries(teeth_object)
-           
-            # teeth_top_ref.x
-            x = (bounds['left']+bounds['right']) * 0.5
-            y = bounds['front'] + (bounds['back']-bounds['front'])*0.2
-            z = bounds['top'] + (bounds['bottom']-bounds['top'])*0.2
-            
-            teeth_top_mid_loc = rig_matrix_world_inv @ Vector((x, y, z))
-            teeth_top_mid = get_edit_bone(teeth_names[1])
-            move_vec = (teeth_top_mid_loc - teeth_top_mid.head)
-            teeth_top_mid.head += move_vec
-            teeth_top_mid.tail += move_vec
-            
-            # teeth_top_ref.l
-            x = bounds['left'] + (bounds['right']-bounds['left']) * 0.1
-            y = bounds['back'] + (bounds['front']-bounds['back'])*0.2
-            z = bounds['top'] + (bounds['bottom']-bounds['top'])*0.2
-            
-            teeth_top_lft_loc = rig_matrix_world_inv @ Vector((x, y, z))
-            teeth_top_left = get_edit_bone(teeth_names[0])
-            move_vec = (teeth_top_lft_loc - teeth_top_left.head)
-            teeth_top_left.head += move_vec
-            teeth_top_left.tail += move_vec
-            
-            # teeth_top_ref.r
-            x = bounds['right'] + (bounds['left']-bounds['right']) * 0.1
-            y = bounds['back'] + (bounds['front']-bounds['back'])*0.2
-            z = bounds['top'] + (bounds['bottom']-bounds['top'])*0.2
-            
-            teeth_top_right_loc = rig_matrix_world_inv @ Vector((x, y, z))
-            teeth_top_right = get_edit_bone(teeth_names[2])
-            move_vec = (teeth_top_right_loc - teeth_top_right.head)
-            teeth_top_right.head += move_vec
-            teeth_top_right.tail += move_vec
-            
-            lower_teeth = get_object(scn.arp_teeth_lower_name)            
-            if lower_teeth:
-                unhide_object(lower_teeth)
-                lower_teeth.hide_select = False
-                bounds = get_object_boundaries(lower_teeth)
-                
-            # teeth_bot_ref.x
-            x = (bounds['left']+bounds['right']) * 0.5
-            y = bounds['front'] + (bounds['back']-bounds['front'])*0.2
-            z = bounds['bottom'] + (bounds['top']-bounds['bottom'])*0.2
-            
-            teeth_bot_mid_loc = rig_matrix_world_inv @ Vector((x, y, z))
-            teeth_bot_mid = get_edit_bone(teeth_names[4])
-            move_vec = (teeth_bot_mid_loc - teeth_bot_mid.head)
-            teeth_bot_mid.head += move_vec
-            teeth_bot_mid.tail += move_vec
-            
-            # teeth_bot_ref.l
-            x = bounds['left'] + (bounds['right']-bounds['left']) * 0.1
-            y = bounds['back'] + (bounds['front']-bounds['back'])*0.2
-            z = bounds['bottom'] + (bounds['top']-bounds['bottom'])*0.2
-            
-            teeth_bot_lft_loc = rig_matrix_world_inv @ Vector((x, y, z))
-            teeth_bot_left = get_edit_bone(teeth_names[3])
-            move_vec = (teeth_bot_lft_loc - teeth_bot_left.head)
-            teeth_bot_left.head += move_vec
-            teeth_bot_left.tail += move_vec
-            
-            # teeth_bot_ref.r
-            x = bounds['right'] + (bounds['left']-bounds['right']) * 0.1
-            y = bounds['back'] + (bounds['front']-bounds['back'])*0.2
-            z = bounds['bottom'] + (bounds['top']-bounds['bottom'])*0.2
-            
-            teeth_bot_right_loc = rig_matrix_world_inv @ Vector((x, y, z))
-            teeth_bot_right = get_edit_bone(teeth_names[5])
-            move_vec = (teeth_bot_right_loc - teeth_bot_right.head)
-            teeth_bot_right.head += move_vec
-            teeth_bot_right.tail += move_vec
-            
-            
-        else:# average teeth position
-            for name in teeth_names:   
-                teeth_b = get_edit_bone(name)
-                teeth_b.head += transf_vec
-                teeth_b.tail += transf_vec
+                    for idx in range(0, 3):
+                        print('    Raycast tongue #'+str(idx)+'...')                
+                        y = bounds['back'] + (bounds['front']-bounds['back'])*y_fac[idx]
+                        x = (bounds['left']+bounds['right'])*0.5
+                        z = bounds['top'] + (bounds['top']-bounds['bottom'])*0.5
+                        ray_origin = tongue_object.matrix_world.inverted() @ Vector((x, y, z))
+                        ray_dir = tongue_object.matrix_world.inverted() @ vectorize3([0.0, 0.0, -10.0])
+                        ray_inc = ray_dir.normalized() * 0.0001
+                        result, loc, normal, index = obj_eval.ray_cast(ray_origin, ray_dir)
 
-    else:
-        print("\n    matching default facial...")
-        
-        # save the chin loc position to use with the "Use Chin" binding option
-        chin_loc = get_object("chin_loc")
-        bpy.context.active_object.data["arp_chin_loc"] = chin_loc.location[2]
-        bpy.context.active_object.data['arp_chin_pos_vec'] = chin_loc.location.copy()
-        # Disable facial bones for now
+                        hit_front = None
+                        
+                        if result:        
+                            hit_front = loc.copy()
+                            have_hit = True
+                            last_hit = loc                
+                            while have_hit:#iterate if multiples faces layers
+                                have_hit = False
+                                result, loc, normal, index = obj_eval.ray_cast(last_hit+ray_inc, ray_dir)
+                                if result:
+                                    have_hit = True
+                                    last_hit = loc
+                            hit_back = last_hit
+                        else:
+                            print('    Tongue raycast'+str(idx)+' failed!')
+
+                        if hit_front:
+                            tongue_raycasted = True
+                            hit_center = (hit_front + hit_back) * 0.5
+                            tongue_xx_loc = obj_eval.matrix_world @ hit_center# convert to world space
+                            tongue_xx_loc = rig_matrix_world_inv @ tongue_xx_loc# convert to armature space
+                            tongue_xx = get_edit_bone(tongue_names[idx])
+                            move_vec = (tongue_xx_loc - tongue_xx.head)
+                            tongue_xx.head += move_vec
+                            if idx == 2:
+                                tongue_xx.tail += move_vec
+                    
+                if tongue_raycasted == False:# no tongue_object, or raycast failed, then average tongue position
+                    for name in tongue_names:
+                        if 'tong_03' in name:
+                            get_edit_bone(name).head += transf_vec
+                            get_edit_bone(name).tail += transf_vec
+                        else:
+                            get_edit_bone(name).head += transf_vec
+                            
+            
+            # Teeth
+            if scn.arp_smart_teeth:
+                teeth_names = ["teeth_top_ref.l", "teeth_top_ref.x", "teeth_top_ref.r", "teeth_bot_ref.l", "teeth_bot_ref.x", "teeth_bot_ref.r"]   
+                
+                teeth_object = get_object(scn.arp_teeth_name)
+                if teeth_object:# get exact teeth positions from object
+                    unhide_object(teeth_object)
+                    teeth_object.hide_select = False       
+                    bounds = get_object_boundaries(teeth_object)
+                   
+                    # teeth_top_ref.x
+                    x = (bounds['left']+bounds['right']) * 0.5
+                    y = bounds['front'] + (bounds['back']-bounds['front'])*0.2
+                    z = bounds['top'] + (bounds['bottom']-bounds['top'])*0.2
+                    
+                    teeth_top_mid_loc = rig_matrix_world_inv @ Vector((x, y, z))
+                    teeth_top_mid = get_edit_bone(teeth_names[1])
+                    move_vec = (teeth_top_mid_loc - teeth_top_mid.head)
+                    teeth_top_mid.head += move_vec
+                    teeth_top_mid.tail += move_vec
+                    
+                    # teeth_top_ref.l
+                    x = bounds['left'] + (bounds['right']-bounds['left']) * 0.1
+                    y = bounds['back'] + (bounds['front']-bounds['back'])*0.2
+                    z = bounds['top'] + (bounds['bottom']-bounds['top'])*0.2
+                    
+                    teeth_top_lft_loc = rig_matrix_world_inv @ Vector((x, y, z))
+                    teeth_top_left = get_edit_bone(teeth_names[0])
+                    move_vec = (teeth_top_lft_loc - teeth_top_left.head)
+                    teeth_top_left.head += move_vec
+                    teeth_top_left.tail += move_vec
+                    
+                    # teeth_top_ref.r
+                    x = bounds['right'] + (bounds['left']-bounds['right']) * 0.1
+                    y = bounds['back'] + (bounds['front']-bounds['back'])*0.2
+                    z = bounds['top'] + (bounds['bottom']-bounds['top'])*0.2
+                    
+                    teeth_top_right_loc = rig_matrix_world_inv @ Vector((x, y, z))
+                    teeth_top_right = get_edit_bone(teeth_names[2])
+                    move_vec = (teeth_top_right_loc - teeth_top_right.head)
+                    teeth_top_right.head += move_vec
+                    teeth_top_right.tail += move_vec
+                    
+                    lower_teeth = get_object(scn.arp_teeth_lower_name)            
+                    if lower_teeth:
+                        unhide_object(lower_teeth)
+                        lower_teeth.hide_select = False
+                        bounds = get_object_boundaries(lower_teeth)
+                        
+                    # teeth_bot_ref.x
+                    x = (bounds['left']+bounds['right']) * 0.5
+                    y = bounds['front'] + (bounds['back']-bounds['front'])*0.2
+                    z = bounds['bottom'] + (bounds['top']-bounds['bottom'])*0.2
+                    
+                    teeth_bot_mid_loc = rig_matrix_world_inv @ Vector((x, y, z))
+                    teeth_bot_mid = get_edit_bone(teeth_names[4])
+                    move_vec = (teeth_bot_mid_loc - teeth_bot_mid.head)
+                    teeth_bot_mid.head += move_vec
+                    teeth_bot_mid.tail += move_vec
+                    
+                    # teeth_bot_ref.l
+                    x = bounds['left'] + (bounds['right']-bounds['left']) * 0.1
+                    y = bounds['back'] + (bounds['front']-bounds['back'])*0.2
+                    z = bounds['bottom'] + (bounds['top']-bounds['bottom'])*0.2
+                    
+                    teeth_bot_lft_loc = rig_matrix_world_inv @ Vector((x, y, z))
+                    teeth_bot_left = get_edit_bone(teeth_names[3])
+                    move_vec = (teeth_bot_lft_loc - teeth_bot_left.head)
+                    teeth_bot_left.head += move_vec
+                    teeth_bot_left.tail += move_vec
+                    
+                    # teeth_bot_ref.r
+                    x = bounds['right'] + (bounds['left']-bounds['right']) * 0.1
+                    y = bounds['back'] + (bounds['front']-bounds['back'])*0.2
+                    z = bounds['bottom'] + (bounds['top']-bounds['bottom'])*0.2
+                    
+                    teeth_bot_right_loc = rig_matrix_world_inv @ Vector((x, y, z))
+                    teeth_bot_right = get_edit_bone(teeth_names[5])
+                    move_vec = (teeth_bot_right_loc - teeth_bot_right.head)
+                    teeth_bot_right.head += move_vec
+                    teeth_bot_right.tail += move_vec
+                    
+                    
+                else:# average teeth position
+                    for name in teeth_names:   
+                        teeth_b = get_edit_bone(name)
+                        teeth_b.head += transf_vec
+                        teeth_b.tail += transf_vec
+
+    else:# no arp_facial_setup
         auto_rig.set_facial(enable=False)
         
 
@@ -2535,8 +4673,7 @@ def _set_skeleton(self):
                 
     # set spine count
     if scn.arp_smart_spine_count != 3 or scn.arp_smart_spine_shape == 'STRAIGHT':
-        rig.rig_spine_count = scn.arp_smart_spine_count
-        auto_rig.set_spine(grid_align=True, bottom=False)
+        auto_rig.set_spine(count=scn.arp_smart_spine_count, grid_align=True, bottom=False)
         
     # need to re-get references, set_spine() is switching mode
     neck_ref = get_edit_bone('neck_ref.x')
@@ -2672,101 +4809,179 @@ def _set_skeleton(self):
         bpy.ops.object.mode_set(mode='EDIT')
                 
             
-    
-
 def create_arp_markers():
     bpy.ops.object.empty_add(type='PLAIN_AXES', radius = 0.01, location=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0))
-    bpy.context.active_object.name = "arp_markers"
-    bpy.context.active_object.hide_select = True
+    am_obj = get_object(bpy.context.active_object.name)
+    am_obj.name = "arp_markers"
+    am_obj.hide_select = True
+    
+    # Assign to main scene collection
+    try:
+        bpy.context.scene.collection.objects.link(am_obj)
+    except:
+        pass
+    # remove previous uiser active collections if any
+    for i in am_obj.users_collection:
+        if i != bpy.context.scene.collection:
+            i.objects.unlink(am_obj)
+
         
-        
-def _add_marker(name, enable_mirror):
+def _add_marker(_name, enable_mirror):
     body = get_object(bpy.context.scene.arp_body_name)
     body_height = body.dimensions[2]
-    scaled_radius = 0.01#body_height/20
+    scaled_radius = body_height/200
+    scn = bpy.context.scene
+    
+    def is_finger_marker(_name):
+        if 'thumb' in _name or 'index' in _name or 'middle' in _name or 'ring' in _name or 'pinky' in _name:
+            return True
+        return False
+        
+    
+    def assign_marker_collec(obj_marker):
+        # Assign to main scene collection
+        try:
+            bpy.context.scene.collection.objects.link(obj_marker)
+        except:
+            pass
+        # remove previous user active collections if any
+        for i in obj_marker.users_collection:
+            if i != bpy.context.scene.collection:
+                i.objects.unlink(obj_marker)
+                
+                
+    def create_empty_img(marker_object):
+        empty_img = bpy.data.objects.new(name=marker_object.name+'_img', object_data=None)
+        empty_img.location = marker_object.location.copy()
+        empty_img.parent = marker_object
+        empty_img.rotation_euler[0] = math.radians(90)
+        empty_img.hide_select = True        
+        empty_img.empty_display_type = 'IMAGE'
+        empty_img.use_empty_image_alpha = True
+        
+        # get image icon
+        img_id_name = 'arp_smart_circle'
+        img = bpy.data.images.get(img_id_name)
+        if img == None:
+            dir = os.path.dirname(os.path.abspath(__file__))
+            addon_dir = os.path.dirname(dir)
+            fp = addon_dir + '/icons/circle.png'
+            img = bpy.data.images.load(fp)
+            img.name = img_id_name
+        empty_img.data = img
+        empty_img.empty_image_depth = 'FRONT'
 
+        try:
+            bpy.context.scene.collection.objects.link(empty_img)
+        except:
+            pass
+
+        empty_img.empty_display_size = body_height/20
+        
+        if 'thumb' in _name or 'index' in _name or 'middle' in _name or 'ring' in _name or 'pinky' in _name:
+            empty_img.empty_display_size *= 0.35
+            
+    
     #apply mesh rotation
     set_active_object(body.name)
     bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
-
-    bpy.ops.object.mode_set(mode='OBJECT')
+    try:
+        bpy.ops.object.mode_set(mode='OBJECT')
+    except: pass
 
     # create an empty parent for the markers
     if get_object("arp_markers") == None:
         create_arp_markers()  
      
     # create the marker if not exists already
-    if get_object(name+"_loc"): #it already exists
+    if get_object(_name+"_loc"): #it already exists
         bpy.ops.object.select_all(action='DESELECT')
-        get_object(name+"_loc").select_set(state=1)
-        set_active_object(name+"_loc")
+        get_object(_name+"_loc").select_set(state=1)
+        set_active_object(_name+"_loc")
     else:
         bpy.ops.object.select_all(action='DESELECT')
         #create it
-        bpy.ops.object.empty_add(type='PLAIN_AXES', radius = scaled_radius, location=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0))
-        bpy.context.active_object.empty_display_type = 'CIRCLE'
-        bpy.context.active_object.empty_display_size = 0.01
+        bpy.ops.object.empty_add(type='PLAIN_AXES', radius=scaled_radius, location=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0))
+        
+        obj_marker = get_object(bpy.context.active_object.name)
+        obj_marker.empty_display_type = 'CIRCLE'
+        obj_marker.empty_display_size = scaled_radius
         # rename it
-        bpy.context.active_object.name = name + "_loc"
+        obj_marker.name = _name+"_loc"
         # parent it
-        bpy.context.active_object.parent = get_object("arp_markers")
+        obj_marker.parent = get_object("arp_markers")
         #enable xray
-        bpy.context.active_object.show_in_front = True
-
-
-        if name == "shoulder" or name == "hand" or name == "foot":
+        obj_marker.show_in_front = True
+        
+        assign_marker_collec(obj_marker)            
+        
+            
+        if _name in ["shoulder", "hand", "foot", "thigh", "knee", "hand_tip", "elbow"] or is_finger_marker(_name):
             # add limit constraint
             cns = bpy.context.active_object.constraints.new('LIMIT_LOCATION')
             cns.use_min_x = True
             cns.use_transform_limit = True
 
             # create mirror markers with constraint
-            bpy.ops.object.empty_add(type='PLAIN_AXES', radius = scaled_radius, location=(0,0,0), rotation=(0, 0, 0))
-            bpy.context.active_object.empty_display_type = 'CIRCLE'
-            bpy.context.active_object.empty_display_size = scaled_radius
+            bpy.ops.object.empty_add(type='PLAIN_AXES', radius=scaled_radius, location=(0,0,0), rotation=(0, 0, 0))
+            marker_sym = get_object(bpy.context.active_object.name)
+            marker_sym.empty_display_type = 'CIRCLE'
+            marker_sym.empty_display_size = scaled_radius
 
             # rename it
-            bpy.context.active_object.name = name + "_loc_sym"
+            marker_sym.name = _name+"_loc_sym"
 
             # parent it
-            bpy.context.active_object.parent = get_object("arp_markers")
+            marker_sym.parent = get_object("arp_markers")
+            #print("parent", marker_sym.name, "to arp_markers")
 
             #enable xray
-            bpy.context.active_object.show_in_front = True
-
+            marker_sym.show_in_front = True
+            
+            assign_marker_collec(marker_sym)
+            
             #add mirror constraint
-            cns = bpy.context.active_object.constraints.new('COPY_LOCATION')
-            cns.target = get_object(name+"_loc")
+            cns = marker_sym.constraints.new('COPY_LOCATION')
+            cns.target = get_object(_name+"_loc")
             cns.invert_x = True
 
             if enable_mirror == False:
                 cns.influence = 0.0
 
             #add limit constraint
-            cns = bpy.context.active_object.constraints.new('LIMIT_LOCATION')
+            cns = marker_sym.constraints.new('LIMIT_LOCATION')
             cns.use_max_x = True
             cns.use_transform_limit = True
-
-
+            
+            if scn.arp_disable_smart_fx:
+                create_empty_img(marker_sym)
+                
             #select back the main empty
-            set_active_object(name+"_loc")
+            set_active_object(_name+"_loc")
+            
 
     # markers specific options
     if bpy.context.scene.arp_smart_sym:
-        if name == "neck" or name == "root" or name == "chin":
+        if _name == "neck" or _name == "root" or _name == "chin" or _name == 'head_tip':
             bpy.context.active_object.lock_location[0] = True
+         
+    # use empty images if real FX drawing is disabled (Mac issues)
+    if scn.arp_disable_smart_fx:
+        create_empty_img(obj_marker)
+    
+        
 
 
 def _auto_detect(self):
     print("\nAuto-Detecting... \n")
     
-    scene = bpy.context.scene
+    scn = bpy.context.scene
     
     set_selection_filters(['EMPTY', 'MESH', 'ARMATURE'], True)
     show_extras(True)
     
     # get character mesh name
-    body = get_object(scene.arp_body_name)
+    body = get_object(scn.arp_body_name)
 
     # apply transforms
     bpy.ops.object.select_all(action='DESELECT')
@@ -2815,24 +5030,20 @@ def _auto_detect(self):
     bpy.ops.object.select_all(action='DESELECT')
 
     #  save current pivot mode
-    pivot_mod = scene.tool_settings.transform_pivot_point
+    pivot_mod = scn.tool_settings.transform_pivot_point
     
-    if scene.arp_smart_type == 'BODY':
+    if scn.arp_smart_type == 'BODY':
         # Arms
         #   get the loc guides
         hand_loc_l = get_object("hand_loc")
         hand_loc_r = get_object("hand_loc_sym")
-
-        wrist_bound_front_l = None
-        wrist_bound_back_l = None
-        wrist_bound_front_r = None
-        wrist_bound_back_r = None
+      
         hand_empty_loc_l = None
         hand_empty_loc_r = None
 
         hand_markers = [hand_loc_l]
 
-        if not scene.arp_smart_sym:
+        if not scn.arp_smart_sym:
             hand_markers.append(hand_loc_r)
 
         # iterate on left and right sides
@@ -2855,7 +5066,7 @@ def _auto_detect(self):
 
             # HAND DETECTION ----------
 
-            if scene.arp_debug_mode:
+            if scn.arp_debug_mode:
                 print("    Find hands boundaries...\n")
 
             print("    Find wrist...\n")
@@ -2892,7 +5103,10 @@ def _auto_detect(self):
                 return
 
             hand_loc_x = hand_marker.location[0]
-            hand_loc_y = wrist_bound_back + ((wrist_bound_front - wrist_bound_back)*0.4)
+            hand_loc_y = hand_marker.location[1]            
+            if not scn.arp_smart_depth:
+                hand_loc_y = wrist_bound_back + ((wrist_bound_front - wrist_bound_back)*0.5)
+                
             hand_loc_z = hand_marker.location[2]
 
             # Sides naming handling
@@ -2914,7 +5128,7 @@ def _auto_detect(self):
             shoulder_front = None
             shoulder_back = None
 
-            if scene.arp_debug_mode:
+            if scn.arp_debug_mode:
                 print("    Find shoulders...\n")
 
             ray_origin = shoulder_loc.location + vectorize3([0, -body_depth*2, 0])
@@ -2938,24 +5152,44 @@ def _auto_detect(self):
 
                 shoulder_back = last_hit[1]
 
-            shoulder_empty_loc = [shoulder_loc.location[0], shoulder_back + (shoulder_front-shoulder_back)*0.4, shoulder_loc.location[2]]
+            shoulder_depth = 0.0
+            
+            if scn.arp_smart_depth:
+                shoulder_depth = shoulder_loc.location[1]
+            else:
+                shoulder_depth = shoulder_back + (shoulder_front-shoulder_back)*0.4                
+                
+            shoulder_empty_loc = [shoulder_loc.location[0], shoulder_depth, shoulder_loc.location[2]]
 
             # Shoulder_base
-            # Y position: best to bring it forward for best compatibility with humanoid rigs (unreal)
-            shoulder_base_loc = [shoulder_empty_loc[0]/4, shoulder_back + (shoulder_front-shoulder_back)*0.8, shoulder_empty_loc[2]]
+            # Y position: best to bring it forward for best compatibility with humanoid rigs (UE) (Model Fit only)
+            base_depth = 0.0
+            if scn.arp_smart_depth:
+                base_depth = shoulder_empty_loc[1] + (shoulder_front-shoulder_empty_loc[1])*0.5
+            else:
+                
+                base_depth = shoulder_back + (shoulder_front-shoulder_back)*0.8                
+                
+            shoulder_base_loc = [shoulder_empty_loc[0]/4, base_depth, shoulder_empty_loc[2]]
             
             
             # Elbow
-            _hand_empty_loc = hand_empty_loc_l
-            if side_idx == 1:
-                _hand_empty_loc = hand_empty_loc_r
+            _hand_empty_loc = hand_empty_loc_l if side_idx == 0 else hand_empty_loc_r   
             
-            elbow_empty_loc = [(shoulder_empty_loc[0] + _hand_empty_loc[0])/2, 0, (shoulder_empty_loc[2] + _hand_empty_loc[2])/2]
-            elbow_empty_loc = vectorize3(elbow_empty_loc)
+            #   auto elbow loc
+            elbow_empty_loc = Vector(( (shoulder_empty_loc[0] + _hand_empty_loc[0])/2, 0, (shoulder_empty_loc[2] + _hand_empty_loc[2])/2 ))
+            
+            #   from marker
+            elbow_loc_obj = get_object('elbow_loc') if side_idx == 0 else get_object('elbow_loc_sym')
+            if elbow_loc_obj:
+                elbow_empty_loc[0], elbow_empty_loc[2] = elbow_loc_obj.location[0], elbow_loc_obj.location[2]
+                if scn.arp_smart_depth:
+                    elbow_empty_loc[1] = elbow_loc_obj.location[1]
+                    
             
             # Find the elbow boundaries
             
-            if scene.arp_debug_mode:
+            if scn.arp_debug_mode:
                 print("    Find elbow boundaries...\n")
                 
             # Get the arm X angle
@@ -3041,16 +5275,18 @@ def _auto_detect(self):
             elbow_angle = math.degrees((p-line_a).angle(line_b-line_a))
             print("Elbow Angle:", elbow_angle)
             
-            if elbow_angle > 3.6:
-                # get the resulting vector
-                vec = p-p_proj
-                elbow_empty_loc += vec
-            
-            # adjust elbow depth
-            elbow_empty_loc[1] = elbow_back + (elbow_front - elbow_back)*0.3
-            
             elbow_center = elbow_empty_loc.copy()
-            elbow_center[1]  = elbow_back + (elbow_front - elbow_back)*0.5
+            
+            if not scn.arp_smart_depth or elbow_loc_obj == None:
+                if elbow_angle > 3.6:
+                    # get the resulting vector
+                    vec = p-p_proj
+                    elbow_empty_loc += vec
+            
+                # adjust elbow depth
+                elbow_empty_loc[1] = elbow_back + (elbow_front - elbow_back)*0.3            
+                elbow_center = elbow_empty_loc.copy()
+                elbow_center[1]  = elbow_back + (elbow_front - elbow_back)*0.5
             
             # create the empties
             bpy.ops.object.mode_set(mode='OBJECT')
@@ -3064,623 +5300,625 @@ def _auto_detect(self):
             # FINGERS DETECTION ---------------------------------------------------------------------------------------------
 
             print("    Find fingers...\n")
-            
-            # Initialize the hand rotation by creating a new hand mesh horizontally aligned
-            
-            # Z angle
-            #print("hand loc temp", hand_loc_temp, "elbow center", elbow_center_temp)        
-            global_x_vec = Vector((1.0 * fac, 0.0, 0.0))
-            global_y_vec = Vector((0, 1.0 * fac, 0.0))
-            
-            hand_loc_vec = vectorize3(_hand_empty_loc.copy())
-            hand_loc_vec = rotate_point(hand_loc_vec, -arm_angle_x, global_y_vec, shoulder_pos)
-            hand_loc_vec[2] = 0.0
-            
-            elbow_loc_vec = vectorize3(elbow_center.copy())        
-            elbow_loc_vec = rotate_point(elbow_loc_vec, -arm_angle_x, global_y_vec, shoulder_pos)
-            elbow_loc_vec[2] = 0.0
-                    
-            forearm_vec = hand_loc_vec - elbow_loc_vec
-                   
-            forearm_angle_z = forearm_vec.angle(global_x_vec)
-            
-            if scene.arp_debug_mode:
-                print('      Arm Angle X:', degrees(arm_angle_x))
-                print('      Arm Angle Z:', degrees(forearm_angle_z))
-            
-            self.arm_angle_x = degrees(arm_angle_x)
-
-            body.hide_select = False
-            
-            bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.object.select_all(action='DESELECT')        
-            
-            set_active_object(body.name)
-
-            obj_scene_list = [i.name for i in bpy.data.objects]
-            
-            duplicate_object()
-            
-            # 2.8 bug... objs get hidden after duplication :(
-            for obje in bpy.data.objects:
-                if obje.name not in obj_scene_list:
-                    unhide_object(obje)
-                    set_active_object(obje.name)
-                    
-            bpy.context.active_object.name = 'arp_hand_aligned'
-
-            bpy.context.active_object.parent = get_object("arp_temp_detection")
-
-
-            # create a selection helper transform
-            rot_fac = 1
-            if side_idx == 1:
-                rot_fac = -1
-            bpy.ops.mesh.primitive_plane_add(size=1, enter_editmode=False, location= hand_marker.location , rotation=(0, arm_angle_x * rot_fac, -forearm_angle_z * rot_fac))
-            bpy.context.active_object.name = "arp_hand_transform"
-            bpy.context.active_object.parent = get_object("arp_temp_detection")
-            hand_transf = get_object("arp_hand_transform")
-            matrix_sel = hand_transf.matrix_world
-            
-            set_active_object("arp_hand_aligned")
-            
-            bpy.ops.object.mode_set(mode='EDIT')
-            bpy.ops.mesh.select_all(action='DESELECT')
-            mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
-
-            # select the hand according to the selection helper
-            for v in mesh.verts:
-                if side_idx == 0:
-                    if (matrix_sel.inverted() @ v.co)[0] < 0.0:
-                        v.select = True
-                if side_idx == 1:
-                    if (matrix_sel.inverted() @ v.co)[0] > 0.0:
-                        v.select = True
-
-            
-            # delete other verts
-            bpy.ops.mesh.delete(type='VERT')
-
-            if scene.arp_debug_mode:
-                print("    Remesh...")
-            # Remesh
-            bpy.ops.object.mode_set(mode='OBJECT')
-            mod = bpy.context.active_object.modifiers.new('remesh', 'REMESH')
-
-            if scene.arp_smart_remesh_type == "type1":
-                mod.mode = 'SMOOTH'
-                # it's best to set the remesh definition according to the mesh actual dimensions
-                if bpy.context.active_object.dimensions[0] < (body_width/3):# generally, t-pose
-                    remesh_def = scene.arp_smart_remesh - 2
-                else:# a-pose
-                    remesh_def = scene.arp_smart_remesh
-
-                mod.octree_depth = remesh_def
-                mod.use_remove_disconnected = True
-                mod.threshold = 0.032
-
-            elif scene.arp_smart_remesh_type == "type2":
-                mod.mode = 'VOXEL'
-                mod.voxel_size = 0.0016 * bpy.context.active_object.dimensions[0] * (1/(scene.arp_smart_remesh/9))
-                mod.adaptivity = 0.0
-            
-            bpy.ops.object.convert(target='MESH')
-            
-            # select the closest point to the wrist marker
-            if scene.arp_debug_mode:
-                print("    Select closest point to the wrist")
-            bpy.ops.object.mode_set(mode='EDIT')
-            obj = bpy.context.active_object
-            mesh = obj.data
-            size = len(mesh.vertices)
-            kd = mathutils.kdtree.KDTree(size)
-
-            for vi, v in enumerate(mesh.vertices):
-                kd.insert(v.co, vi)
-
-            kd.balance()
-
-            co, index, dist = kd.find(_hand_empty_loc)
-
-            if index:
-                b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
-                b_mesh.verts.ensure_lookup_table()
-                b_mesh.verts[index].select = True
-            else:
-                print("Too low poly, could not find the wrist vertices")
-                scene.arp_fingers_to_detect = 0
-
-            bpy.ops.mesh.select_linked(delimit=set())
-            bpy.ops.mesh.select_all(action='INVERT')
-
-            bpy.ops.mesh.delete(type='VERT')
-            
-            #   change for cursor
-            scene.tool_settings.transform_pivot_point = 'CURSOR'
-            scene.cursor.location = shoulder_pos
-
-            #bpy.ops.mesh.select_all(action='SELECT')
-            bpy.ops.object.mode_set(mode='OBJECT')  
-            
-                # rotate hand to t-pose
-            rot_angle_x = -arm_angle_x * rot_fac
-            rot_angle_z = forearm_angle_z * rot_fac
-         
-            rotate_object(obj, rot_angle_x, Vector((0,1,0)), shoulder_pos)       
-            bpy.ops.object.mode_set(mode='OBJECT')
-            
-            rotate_object(obj, rot_angle_z, Vector((0,0,1)), vectorize3(elbow_empty_loc)) 
-            bpy.ops.object.mode_set(mode='OBJECT')       
-            
-            rotate_object(hand_transf, rot_angle_z, Vector((0,0,1)), vectorize3(elbow_empty_loc)) 
-            bpy.ops.object.mode_set(mode='OBJECT')
-            
-            rotate_object(hand_transf, rot_angle_x, Vector((0,1,0)), shoulder_pos) 
-            bpy.ops.object.mode_set(mode='OBJECT')
-            
-            bpy.ops.object.select_all(action='DESELECT')        
-            set_active_object(obj.name)
-            
-            bpy.ops.object.transform_apply(location=True, rotation=True, scale=False)
-            
-            
-            if scene.arp_fingers_to_detect != 0 :
-                print("    Detecting fingers", side, "...")
-
-                bpy.ops.object.select_all(action='DESELECT')
-                set_active_object('hand_loc'+suff)
-
-                #rotate the marker horizontal
-                def_rotate_value = -arm_angle_x*rot_fac
+            if scn.arp_smart_fingers_engine == 'LEGACY' and scn.arp_fingers_to_detect != 0:
+                # Initialize the hand rotation by creating a new hand mesh horizontally aligned
                 
-                rotate_object(bpy.context.active_object, def_rotate_value, Vector((0,1,0)), shoulder_pos)
+                # Z angle
+                #print("hand loc temp", hand_loc_temp, "elbow center", elbow_center_temp)        
+                global_x_vec = Vector((1.0 * fac, 0.0, 0.0))
+                global_y_vec = Vector((0, 1.0 * fac, 0.0))
+                
+                hand_loc_vec = vectorize3(_hand_empty_loc.copy())
+                hand_loc_vec = rotate_point(hand_loc_vec, -arm_angle_x, global_y_vec, shoulder_pos)
+                hand_loc_vec[2] = 0.0
+                
+                elbow_loc_vec = vectorize3(elbow_center.copy())        
+                elbow_loc_vec = rotate_point(elbow_loc_vec, -arm_angle_x, global_y_vec, shoulder_pos)
+                elbow_loc_vec[2] = 0.0
+                        
+                forearm_vec = hand_loc_vec - elbow_loc_vec
+                       
+                forearm_angle_z = forearm_vec.angle(global_x_vec)
+                
+                if scn.arp_debug_mode:
+                    print('      Arm Angle X:', degrees(arm_angle_x))
+                    print('      Arm Angle Z:', degrees(forearm_angle_z))
+                
+                self.arm_angle_x = degrees(arm_angle_x)
 
-                set_active_object('arp_hand_aligned')
-                hand_dim_x = bpy.context.active_object.dimensions[0]
-                bpy.ops.object.mode_set(mode='EDIT')
-
-                # smooth a little
-                bpy.ops.mesh.select_all(action='SELECT')
-                bpy.ops.mesh.vertices_smooth(repeat=6, factor=1.0)
-
-                bpy.ops.mesh.select_all(action='DESELECT')
+                body.hide_select = False
+                
                 bpy.ops.object.mode_set(mode='OBJECT')
-                hand_obj = get_object("arp_hand_aligned")
+                bpy.ops.object.select_all(action='DESELECT')
+                
+                body_dupli = duplicate_object(method='data', obj=body, new_name='arp_hand_aligned')
+                set_active_object(body_dupli.name)
 
-                p_coords=[]
+                body_dupli.parent = get_object('arp_temp_detection')
 
-                if get_object("arp_part_verts"):
-                    bpy.data.objects.remove(get_object("arp_part_verts"), do_unlink=True)
+                # create a selection helper transform
+                rot_fac = 1
+                if side_idx == 1:
+                    rot_fac = -1
+                bpy.ops.mesh.primitive_plane_add(size=1, enter_editmode=False, location= hand_marker.location , rotation=(0, arm_angle_x * rot_fac, -forearm_angle_z * rot_fac))
+                bpy.context.active_object.name = "arp_hand_transform"
+                bpy.context.active_object.parent = get_object("arp_temp_detection")
+                hand_transf = get_object("arp_hand_transform")
+                matrix_sel = hand_transf.matrix_world
+                
+                set_active_object("arp_hand_aligned")
+                
+                bpy.ops.object.mode_set(mode='EDIT')
+                bpy.ops.mesh.select_all(action='DESELECT')
+                mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
 
-                print("\n    Generating particles...")
-                # create the particles
-                if len(hand_obj.particle_systems) != 0:
+                # select the hand according to the selection helper
+                for v in mesh.verts:
+                    if side_idx == 0:
+                        if (matrix_sel.inverted() @ v.co)[0] < 0.0:
+                            v.select = True
+                    if side_idx == 1:
+                        if (matrix_sel.inverted() @ v.co)[0] > 0.0:
+                            v.select = True
+
+                
+                # delete other verts
+                bpy.ops.mesh.delete(type='VERT')
+                
+                if scn.arp_debug_mode:
+                    print("    Remesh...")
+                # Remesh
+                bpy.ops.object.mode_set(mode='OBJECT')
+                mod = bpy.context.active_object.modifiers.new('remesh', 'REMESH')
+
+                if scn.arp_smart_remesh_type == "type1":
+                    mod.mode = 'SMOOTH'
+                    # it's best to set the remesh definition according to the mesh actual dimensions
+                    if bpy.context.active_object.dimensions[0] < (body_width/3):# generally, t-pose
+                        remesh_def = scn.arp_smart_remesh - 2
+                    else:# a-pose
+                        remesh_def = scn.arp_smart_remesh
+
+                    mod.octree_depth = remesh_def
+                    mod.use_remove_disconnected = True
+                    mod.threshold = 0.0015
+
+                elif scn.arp_smart_remesh_type == "type2":
+                    mod.mode = 'VOXEL'
+                    mod.voxel_size = 0.0016 * bpy.context.active_object.dimensions[0] * (1/(scn.arp_smart_remesh/9))
+                    mod.adaptivity = 0.0
+                
+                bpy.ops.object.convert(target='MESH')
+                
+                # select the closest point to the wrist marker
+                if scn.arp_debug_mode:
+                    print("    Select closest point to the wrist")
+                bpy.ops.object.mode_set(mode='EDIT')
+                obj = bpy.context.active_object
+                mesh = obj.data
+                size = len(mesh.vertices)
+                kd = mathutils.kdtree.KDTree(size)
+
+                for vi, v in enumerate(mesh.vertices):
+                    kd.insert(v.co, vi)
+
+                kd.balance()
+
+                co, index, dist = kd.find(_hand_empty_loc)
+
+                if index:
+                    b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
+                    b_mesh.verts.ensure_lookup_table()
+                    b_mesh.verts[index].select = True
+
+                    bpy.ops.mesh.select_linked(delimit=set())
+                    bpy.ops.mesh.select_all(action='INVERT')
+
+                    bpy.ops.mesh.delete(type='VERT')
+                    
+                    #   change for cursor
+                    scn.tool_settings.transform_pivot_point = 'CURSOR'
+                    scn.cursor.location = shoulder_pos
+
+                    bpy.ops.object.mode_set(mode='OBJECT')  
+                    
+                    #   rotate hand to t-pose
+                    rot_angle_x = -arm_angle_x * rot_fac
+                    rot_angle_z = forearm_angle_z * rot_fac
+                 
+                    rotate_object(obj, rot_angle_x, Vector((0,1,0)), shoulder_pos)       
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    
+                    rotate_object(obj, rot_angle_z, Vector((0,0,1)), vectorize3(elbow_empty_loc)) 
+                    bpy.ops.object.mode_set(mode='OBJECT')       
+                    
+                    rotate_object(hand_transf, rot_angle_z, Vector((0,0,1)), vectorize3(elbow_empty_loc)) 
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    
+                    rotate_object(hand_transf, rot_angle_x, Vector((0,1,0)), shoulder_pos) 
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    
+                    bpy.ops.object.select_all(action='DESELECT')        
+                    set_active_object(obj.name)
+                    
+                    bpy.ops.object.transform_apply(location=True, rotation=True, scale=False)
+                
+
+                    print("    Detecting fingers", side, "...")
+
+                    bpy.ops.object.select_all(action='DESELECT')
+                    set_active_object('hand_loc'+suff)
+
+                    #rotate the marker horizontal
+                    def_rotate_value = -arm_angle_x*rot_fac
+                    
+                    rotate_object(bpy.context.active_object, def_rotate_value, Vector((0,1,0)), shoulder_pos)
+
+                    set_active_object('arp_hand_aligned')
+                    hand_dim_x = bpy.context.active_object.dimensions[0]
+                    bpy.ops.object.mode_set(mode='EDIT')
+
+                    # smooth a little
+                    bpy.ops.mesh.select_all(action='SELECT')
+                    bpy.ops.mesh.vertices_smooth(repeat=6, factor=1.0)
+
+                    bpy.ops.mesh.select_all(action='DESELECT')
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    hand_obj = get_object("arp_hand_aligned")
+
+                    p_coords=[]
+
+                    if get_object("arp_part_verts"):
+                        bpy.data.objects.remove(get_object("arp_part_verts"), do_unlink=True)
+
+                    print("\n    Generating particles...")
+                    # create the particles
+                    if len(hand_obj.particle_systems) != 0:
+                        hand_obj.modifiers.remove(hand_obj.modifiers[0])
+
+                    hand_obj.modifiers.new("part", type='PARTICLE_SYSTEM')
+                    bpy.context.evaluated_depsgraph_get().update()
+                    hand_obj_eval = bpy.context.evaluated_depsgraph_get().objects.get(hand_obj.name, None)
+                    ps = hand_obj.particle_systems[0]
+                    """
+                    # the depsgraph evaluated object leads to update issues when setting particles params
+                    # disable for now
+                    if hand_obj_eval:
+                        ps = hand_obj_eval.particle_systems[0]
+                    else:
+                        print("Error, could not evaluate the hand_obj object in depsgraph")
+                    """
+                    settings = ps.settings
+                    settings.frame_start = 0
+                    settings.frame_end = 0
+                    settings.count = 1600
+                    settings.emit_from = 'VOLUME'
+                    settings.distribution = 'JIT'
+                    settings.physics_type = 'NO'
+                    settings.render_type = 'HALO'
+                    settings.display_size = 0.005
+                    settings.lifetime = 100000
+
+                    # update
+                    bpy.ops.object.mode_set(mode='EDIT')
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    ps = hand_obj_eval.particle_systems[0]
+
+                    # bake to vertices
+                    bpy.ops.mesh.primitive_plane_add(size=100, enter_editmode=False, location=(0, 0, 0), rotation=(0, 0, 0))
+                    bpy.ops.object.mode_set(mode='EDIT')
+                    bpy.ops.mesh.select_all(action='SELECT')
+                    bpy.ops.mesh.delete(type='VERT')
+                    bpy.context.active_object.name = "arp_part_verts"
+                    arp_part_verts = get_object("arp_part_verts")
+
+                    #   create verts
+                    finger_trial = 1
+                    b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
+                    for p in ps.particles:
+                        if p.location != [0,0,0]:# bug, some particles may be in the world center, skip them
+                            b_mesh.verts.new(p.location)
+
+                    bpy.ops.mesh.select_all(action='SELECT')
+                    bpy.ops.object.mode_set(mode='OBJECT')
+
+                    #   delete particles
                     hand_obj.modifiers.remove(hand_obj.modifiers[0])
 
-                hand_obj.modifiers.new("part", type='PARTICLE_SYSTEM')
-                bpy.context.evaluated_depsgraph_get().update()
-                hand_obj_eval = bpy.context.evaluated_depsgraph_get().objects.get(hand_obj.name, None)
-                ps = hand_obj.particle_systems[0]
-                """
-                # the depsgraph evaluated object leads to update issues when setting particles params
-                # disable for now
-                if hand_obj_eval:
-                    ps = hand_obj_eval.particle_systems[0]
-                else:
-                    print("Error, could not evaluate the hand_obj object in depsgraph")
-                """
-                settings = ps.settings
-                settings.frame_start = 0
-                settings.frame_end = 0
-                settings.count = 1600
-                settings.emit_from = 'VOLUME'
-                settings.distribution = 'JIT'
-                settings.physics_type = 'NO'
-                settings.render_type = 'HALO'
-                settings.display_size = 0.005
-                settings.lifetime = 100000
+                    #   merge to main object
+                    bpy.ops.object.select_all(action='DESELECT')
+                    set_active_object("arp_part_verts")
 
-                # update
-                bpy.ops.object.mode_set(mode='EDIT')
-                bpy.ops.object.mode_set(mode='OBJECT')
-                ps = hand_obj_eval.particle_systems[0]
-
-                # bake to vertices
-                bpy.ops.mesh.primitive_plane_add(size=100, enter_editmode=False, location=(0, 0, 0), rotation=(0, 0, 0))
-                bpy.ops.object.mode_set(mode='EDIT')
-                bpy.ops.mesh.select_all(action='SELECT')
-                bpy.ops.mesh.delete(type='VERT')
-                bpy.context.active_object.name = "arp_part_verts"
-                arp_part_verts = get_object("arp_part_verts")
-
-                    # create verts
-                finger_trial = 1
-                b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
-                for p in ps.particles:
-                    if p.location != [0,0,0]:# bug, some particles may be in the world center, skip them
-                        b_mesh.verts.new(p.location)
-
-                bpy.ops.mesh.select_all(action='SELECT')
-                bpy.ops.object.mode_set(mode='OBJECT')
-
-                    # delete particles
-                hand_obj.modifiers.remove(hand_obj.modifiers[0])
-
-                    # merge to main object
-                bpy.ops.object.select_all(action='DESELECT')
-                set_active_object("arp_part_verts")
-
-                set_active_object(hand_obj.name)
-                bpy.ops.object.join()
-
-                bpy.ops.object.mode_set(mode='EDIT')
-                b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
-                particles_vert_loc = [i.co.copy() for i in b_mesh.verts if i.select]
-
-                # 2 possible trials to help to detect fingers in special cases: first without the "straight thumb" option, second with
-                for finger_detection_trial in [1, 2]:
-                    print("\n    [Trial:", finger_detection_trial, ']')
-
-                    print("    Centering particles...")
+                    set_active_object(hand_obj.name)
+                    bpy.ops.object.join()
 
                     bpy.ops.object.mode_set(mode='EDIT')
-                    hand_obj = get_object(bpy.context.active_object.name)
-                    b_mesh = bmesh.from_edit_mesh(hand_obj.data)
-                    my_tree = BVHTree.FromBMesh(b_mesh)
-                    b_mesh.verts.ensure_lookup_table()
-                    #hand_transf.rotation_euler = [0,0,0]
-                    hand_transf.location = [0,0,0]
-                    bpy.context.evaluated_depsgraph_get().update()
-                    matrix_sel1 = hand_transf.matrix_world.copy()
-                    
-                    ray_dir_z = Vector((0,0,100))
-                    ray_dir_x = Vector((100,0,0))
-                    ray_dir_y = Vector((0,100,0))
+                    b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
+                    particles_vert_loc = [i.co.copy() for i in b_mesh.verts if i.select]
 
-                    centering_engine = 1
-                    dist_fac = 1
-                    
-                    # No centering engine for 1 finger detection. Only raycast detection.
-                    if scene.arp_fingers_to_detect == 1:
-                        centering_engine = -1
+                    # 2 possible trials to help to detect fingers in special cases: first without the "straight thumb" option, second with
+                    for finger_detection_trial in [1, 2]:
+                        print("\n    [Trial:", finger_detection_trial, ']')
 
-                    if centering_engine == 1:
-                        # Build the KD Tree used to find the nearest vert to a given one
-                        size = len(b_mesh.verts)
-                        kd = mathutils.kdtree.KDTree(size)
+                        print("    Centering particles...")
 
-                        for vi, v in enumerate(b_mesh.verts):
-                            kd.insert(v.co, vi)
-
-                        kd.balance()
-
-                        def filter_vert_search(_index):
-                            searched_vert = b_mesh.verts[_index]
-                            return len(searched_vert.link_edges) > 0 and _index != vert.index
-
-                        vert_to_del = []
-
-                        for vert in b_mesh.verts:
-                            for iter in range(0, 7):
-                                if not vert.select or vert in vert_to_del:
-                                    continue
-
-                                # look for the nearest vert on mesh and get its normal
-                                pos, idx, dist = kd.find(vert.co, filter=filter_vert_search)
-
-                                if pos != None:
-                                    v_norm = b_mesh.verts[idx].normal
-
-                                    # Cast a ray from this vert, normal direction
-                                    hit, normal, index, distance = my_tree.ray_cast(pos -v_norm*0.0001, -v_norm, 100000)
-                                    if hit != None:
-                                        vert.co = (hit + pos)/2
-
-                                        # delete verts in the palm
-                                        if finger_detection_trial == 1:
-                                            y_dir = matrix_sel1 @ Vector((0,1,0))
-                                            y_ndir = matrix_sel1 @ Vector((0,-1,0))
-
-                                            y_hit, y_normal, y_index, y_distance = my_tree.ray_cast(vert.co, y_dir, 100000)
-                                            ny_hit, ny_normal, ny_index, ny_distance = my_tree.ray_cast(vert.co, y_ndir, 100000)
-
-                                            if y_hit and ny_hit:
-                                                y_magn = y_distance + ny_distance
-
-                                                dist_max = (dist_fac * (hand_obj.dimensions[1] * scene.arp_finger_thickness)) / 9.0
-
-                                                if y_magn > dist_max:
-                                                    vert_to_del.append(vert)
-
-
-                                        if finger_detection_trial == 2:
-                                            y_dir = matrix_sel1 @ Vector((0,1,0))
-                                            y_ndir = matrix_sel1 @ Vector((0,-1,0))
-                                            x_dir = matrix_sel1 @ Vector((1,0,0))
-                                            x_ndir = matrix_sel1 @ Vector((-1,0,0))
-
-                                            y_hit, y_normal, y_index, y_distance = my_tree.ray_cast(vert.co, y_dir, 100000)
-                                            ny_hit, ny_normal, ny_index, ny_distance = my_tree.ray_cast(vert.co, y_ndir, 100000)
-                                            x_hit, x_normal, x_index, x_distance = my_tree.ray_cast(vert.co, x_dir, 100000)
-                                            nx_hit, nx_normal, nx_index, nx_distance = my_tree.ray_cast(vert.co, x_ndir, 100000)
-
-                                            if y_hit and ny_hit and x_hit and nx_hit:
-                                                y_magn = y_distance + ny_distance
-                                                x_magn = x_distance + nx_distance
-
-                                                dist_max = (dist_fac * (hand_obj.dimensions[1] * scene.arp_finger_thickness)) / 9.0
-
-                                                if y_magn > dist_max and x_magn > dist_max:
-                                                    vert_to_del.append(vert)
-                                else:
-                                    # invalid, no close vert could be found
-                                    vert_to_del.append(vert)
-
-                        for vert in vert_to_del:
-                            b_mesh.verts.remove(vert)
-                    
-                    # Remove double to get a smooth distribution of the vertices
-                    hand_obj.data.update()
-                    bpy.ops.object.mode_set(mode='OBJECT')
-                    bpy.ops.object.mode_set(mode='EDIT')
-                    #print("Merge by distance of:", hand_obj.dimensions[0]/40, "hand dim x=", hand_obj.dimensions[0])
-                    
-                    dist_fac = 40
-                    if degrees(forearm_angle_z) > 30:# forearm rotated at high angle leads to longer wrists, then need to shorten dist
-                        dist_fac = 60
-                        print("    set dist fac", dist_fac)
-                    bpy.ops.mesh.remove_doubles(threshold=hand_obj.dimensions[0]/dist_fac)
-                    
-                    def get_index(list, value):
-                        # return the index of a vertice from its position
-                        for _i, j in enumerate(list):
-                            if j == value:
-                                return _i
-                    
-                    # Separate the longer finger tip vertice as a new vert, if fingers to detect == 1 or 2
-                    if scene.arp_fingers_to_detect == 1 or scene.arp_fingers_to_detect == 2:
-                        b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
-                        b_mesh.verts.ensure_lookup_table()
-                        vert_coords1 = []
-                        for vert in b_mesh.verts:
-                            vert_coords1.append(Vector((vert.co[0], vert.co[1], vert.co[2])))
-
-                        # Get the longer finger tip
-                        coords_sorted1 = sorted(vert_coords1, reverse=True, key=itemgetter(0))
-                        if side_idx == 1:
-                            coords_sorted1 = sorted(vert_coords1, reverse=False, key=itemgetter(0))
-
-                        # Copy the vert (original is deleted after)
-                        new_vert = b_mesh.verts.new(coords_sorted1[0])
-                        new_vert.select = True
-
-                    if scene.arp_debug_mode:
-                        print("\n    Creating edges...")
-
-                    hand_obj = get_object(bpy.context.active_object.name)
-
-                    # separate verts into a new object
-                    if get_object("arp_part_verts") == None:
                         bpy.ops.object.mode_set(mode='EDIT')
+                        
+                        hand_obj = get_object(bpy.context.active_object.name)
+                        b_mesh = bmesh.from_edit_mesh(hand_obj.data)
+                        my_tree = BVHTree.FromBMesh(b_mesh)
+                        b_mesh.verts.ensure_lookup_table()
+                        #hand_transf.rotation_euler = [0,0,0]
+                        hand_transf.location = [0,0,0]
+                        bpy.context.evaluated_depsgraph_get().update()
+                        matrix_sel1 = hand_transf.matrix_world.copy()
+                        
+                        ray_dir_z = Vector((0,0,100))
+                        ray_dir_x = Vector((100,0,0))
+                        ray_dir_y = Vector((0,100,0))
 
-                        try:
-                            bpy.ops.mesh.separate(type="SELECTED")
-                            bpy.ops.object.mode_set(mode='OBJECT')
-                            current_obj = bpy.context.active_object.name
-                            bpy.ops.object.select_all(action='DESELECT')
-                            set_active_object(current_obj+".001")
-                            bpy.context.active_object.name = "arp_part_verts"
+                        centering_engine = 1
+                        dist_fac = 1
+                        
+                        # No centering engine for 1 finger detection. Only raycast detection.
+                        if scn.arp_fingers_to_detect == 1:
+                            centering_engine = -1
 
-                        except:# Error, no vertices have been generated. Probably due to wrong fingers detection amount (look for 5 fingers for mittens or box gloves instead of 1...)
-                            print("    Fingers detection on side", side, "failed, particle generation failed. Probably due to wrong fingers detection parameters (look for 5 fingers instead of 1...)")
-                            if side_idx == 0:
-                                self.fingers_detection_success_l = False
+                        if centering_engine == 1:
+                            # Build the KD Tree used to find the nearest vert to a given one
+                            size = len(b_mesh.verts)
+                            kd = mathutils.kdtree.KDTree(size)
+
+                            for vi, v in enumerate(b_mesh.verts):
+                                kd.insert(v.co, vi)
+
+                            kd.balance()
+
+                            def filter_vert_search(_index):
+                                searched_vert = b_mesh.verts[_index]
+                                return len(searched_vert.link_edges) > 0 and _index != vert.index
+
+                            vert_to_del = []
+
+                            for vert in b_mesh.verts:
+                                for iter in range(0, 7):
+                                    if not vert.select or vert in vert_to_del:
+                                        continue
+
+                                    # look for the nearest vert on mesh and get its normal
+                                    pos, idx, dist = kd.find(vert.co, filter=filter_vert_search)
+
+                                    if pos != None:
+                                        v_norm = b_mesh.verts[idx].normal
+
+                                        # Cast a ray from this vert, normal direction
+                                        hit, normal, index, distance = my_tree.ray_cast(pos -v_norm*0.0001, -v_norm, 100000)
+                                        if hit != None:
+                                            vert.co = (hit + pos)/2
+
+                                            # delete verts in the palm
+                                            if finger_detection_trial == 1:
+                                                y_dir = matrix_sel1 @ Vector((0,1,0))
+                                                y_ndir = matrix_sel1 @ Vector((0,-1,0))
+
+                                                y_hit, y_normal, y_index, y_distance = my_tree.ray_cast(vert.co, y_dir, 100000)
+                                                ny_hit, ny_normal, ny_index, ny_distance = my_tree.ray_cast(vert.co, y_ndir, 100000)
+
+                                                if y_hit and ny_hit:
+                                                    y_magn = y_distance + ny_distance
+
+                                                    dist_max = (dist_fac * (hand_obj.dimensions[1] * scn.arp_finger_thickness)) / 9.0
+
+                                                    if y_magn > dist_max:
+                                                        vert_to_del.append(vert)
+
+
+                                            if finger_detection_trial == 2:
+                                                y_dir = matrix_sel1 @ Vector((0,1,0))
+                                                y_ndir = matrix_sel1 @ Vector((0,-1,0))
+                                                x_dir = matrix_sel1 @ Vector((1,0,0))
+                                                x_ndir = matrix_sel1 @ Vector((-1,0,0))
+
+                                                y_hit, y_normal, y_index, y_distance = my_tree.ray_cast(vert.co, y_dir, 100000)
+                                                ny_hit, ny_normal, ny_index, ny_distance = my_tree.ray_cast(vert.co, y_ndir, 100000)
+                                                x_hit, x_normal, x_index, x_distance = my_tree.ray_cast(vert.co, x_dir, 100000)
+                                                nx_hit, nx_normal, nx_index, nx_distance = my_tree.ray_cast(vert.co, x_ndir, 100000)
+
+                                                if y_hit and ny_hit and x_hit and nx_hit:
+                                                    y_magn = y_distance + ny_distance
+                                                    x_magn = x_distance + nx_distance
+
+                                                    dist_max = (dist_fac * (hand_obj.dimensions[1] * scn.arp_finger_thickness)) / 9.0
+
+                                                    if y_magn > dist_max and x_magn > dist_max:
+                                                        vert_to_del.append(vert)
+                                    else:
+                                        # invalid, no close vert could be found
+                                        vert_to_del.append(vert)
+                            
+                            print("Centered. Remove invalids...")
+                            
+                            for vert in vert_to_del:
+                                b_mesh.verts.remove(vert)
+                                
+                            print("Removed. Remove doubles...")
+
+                        # Remove double to get a smooth distribution of the vertices
+                        hand_obj.data.update()
+                        bpy.ops.object.mode_set(mode='OBJECT')
+                        bpy.ops.object.mode_set(mode='EDIT')
+                        #print("Merge by distance of:", hand_obj.dimensions[0]/40, "hand dim x=", hand_obj.dimensions[0])
+                        
+                        dist_fac = 40
+                        if degrees(forearm_angle_z) > 30:# forearm rotated at high angle leads to longer wrists, then need to shorten dist
+                            dist_fac = 60
+                            print("    set dist fac", dist_fac)
+                            
+                        bpy.ops.mesh.remove_doubles(threshold=hand_obj.dimensions[0]/dist_fac)
+                        
+                        print("Removed.")
+                        
+                        def get_index(list, value):
+                            # return the index of a vertice from its position
+                            for _i, j in enumerate(list):
+                                if j == value:
+                                    return _i
+                       
+                        # Separate the longer finger tip vertice as a new vert, if fingers to detect == 1 or 2
+                        if scn.arp_fingers_to_detect == 1 or scn.arp_fingers_to_detect == 2:
+                            print("Separate longer finger tip...")
+                            b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
+                            b_mesh.verts.ensure_lookup_table()
+                            vert_coords1 = []
+                            for vert in b_mesh.verts:
+                                vert_coords1.append(Vector((vert.co[0], vert.co[1], vert.co[2])))
+
+                            # Get the longer finger tip
+                            coords_sorted1 = sorted(vert_coords1, reverse=True, key=itemgetter(0))
                             if side_idx == 1:
-                                self.fingers_detection_success_r = False
+                                coords_sorted1 = sorted(vert_coords1, reverse=False, key=itemgetter(0))
 
-                    else:
-                        set_active_object("arp_part_verts")
+                            # Copy the vert (original is deleted after)
+                            new_vert = b_mesh.verts.new(coords_sorted1[0])
+                            new_vert.select = True
 
-                    if (self.fingers_detection_success_l and side_idx == 0) or (self.fingers_detection_success_r and side_idx == 1):
-                        obj = bpy.context.active_object
-                        # keep only vertices
-                        bpy.ops.object.mode_set(mode='EDIT')
-                        bpy.ops.mesh.select_all(action='SELECT')
-                        bpy.ops.mesh.delete(type='EDGE_FACE')
-                        bpy.ops.mesh.select_all(action='DESELECT')
+                        if scn.arp_debug_mode:
+                            print("\n    Creating edges...")
 
-                        b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
-                        b_mesh.verts.ensure_lookup_table()
+                        hand_obj = get_object(bpy.context.active_object.name)
 
-                        fingers_total = scene.arp_fingers_to_detect
-                        restrict_edgify_half_hand = False
-                        if fingers_total <= 2:
-                            restrict_edgify_half_hand = True
+                        # separate verts into a new object
+                        if get_object("arp_part_verts") == None:
+                            bpy.ops.object.mode_set(mode='EDIT')
 
-                        # Build the vertices coords list (centered verts cloud, if more than 2 fingers to detect)
-                        vert_coords = []
-                        b_mesh.verts.ensure_lookup_table()
-                        for vert in b_mesh.verts:
-                            vert_coords.append(matrix_sel1.inverted() @ Vector((vert.co[0], vert.co[1], vert.co[2])))
-                        
-                        # Get the longer finger tip
-                            # Sort the list by X values to get the right boundary vert
-                        coords_sorted = sorted(vert_coords, reverse=True, key=itemgetter(0))
-                        if side_idx == 1:
-                            coords_sorted = sorted(vert_coords, reverse=False, key=itemgetter(0))
+                            try:
+                                bpy.ops.mesh.separate(type="SELECTED")
+                                bpy.ops.object.mode_set(mode='OBJECT')
+                                current_obj = bpy.context.active_object.name
+                                bpy.ops.object.select_all(action='DESELECT')
+                                set_active_object(current_obj+".001")
+                                bpy.context.active_object.name = "arp_part_verts"
 
-                            # Get the index in the actual vert list
-                        vert_tip = get_index(vert_coords, coords_sorted[0])
+                            except:# Error, no vertices have been generated. Probably due to wrong fingers detection amount (look for 5 fingers for mittens or box gloves instead of 1...)
+                                print("    Fingers detection on side", side, "failed, particle generation failed. Probably due to wrong fingers detection parameters (look for 5 fingers instead of 1...)")
+                                if side_idx == 0:
+                                    self.fingers_detection_success_l = False
+                                if side_idx == 1:
+                                    self.fingers_detection_success_r = False
 
-                        if scene.arp_debug_mode:
-                            print("    vert_tip", vert_tip, coords_sorted[0])
-                        
-                        bpy.ops.mesh.select_all(action='DESELECT')
-                        b_mesh.verts[vert_tip].select = True
+                        else:
+                            set_active_object("arp_part_verts")
 
-                        first_finger_tip = vert_tip
+                        if (self.fingers_detection_success_l and side_idx == 0) or (self.fingers_detection_success_r and side_idx == 1):
+                            obj = bpy.context.active_object
+                            # keep only vertices
+                            bpy.ops.object.mode_set(mode='EDIT')
+                            bpy.ops.mesh.select_all(action='SELECT')
+                            bpy.ops.mesh.delete(type='EDGE_FACE')
+                            bpy.ops.mesh.select_all(action='DESELECT')
 
-                        if scene.arp_debug_mode:
-                            print("    Found first finger vert", vert_tip)
-                        
-                        # Create edges between verts
-                            # build the KD Tree used to find the nearest vert to a given one
-                        size = len(b_mesh.verts)
-                        kd = mathutils.kdtree.KDTree(size)
+                            b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
+                            b_mesh.verts.ensure_lookup_table()
 
-                        for vert_tip, v in enumerate(b_mesh.verts):
-                            kd.insert(v.co, vert_tip)
+                            fingers_total = scn.arp_fingers_to_detect
+                            restrict_edgify_half_hand = False
+                            if fingers_total <= 2:
+                                restrict_edgify_half_hand = True
 
-                        kd.balance()
-                        
-                        def get_connected_vert(vert=None, exclude=None):
-                            sel_edge = 0
-                            if len(vert.link_edges) > 1:
-                                if vert.link_edges[sel_edge].verts[0] == exclude or vert.link_edges[sel_edge].verts[1] == exclude:
-                                    sel_edge = 1
+                            # Build the vertices coords list (centered verts cloud, if more than 2 fingers to detect)
+                            vert_coords = []
+                            b_mesh.verts.ensure_lookup_table()
+                            for vert in b_mesh.verts:
+                                vert_coords.append(matrix_sel1.inverted() @ Vector((vert.co[0], vert.co[1], vert.co[2])))
+                            
+                            # Get the longer finger tip
+                                # Sort the list by X values to get the right boundary vert
+                            coords_sorted = sorted(vert_coords, reverse=True, key=itemgetter(0))
+                            if side_idx == 1:
+                                coords_sorted = sorted(vert_coords, reverse=False, key=itemgetter(0))
 
-                            if vert.link_edges[sel_edge].verts[0] != vert:
-                                return vert.link_edges[sel_edge].verts[0]
-                            else:
-                                return vert.link_edges[sel_edge].verts[1]
+                                # Get the index in the actual vert list
+                            vert_tip = get_index(vert_coords, coords_sorted[0])
 
-                        def edgify(starting_vert):
-                            count = 0
-                            dist_max = bpy.context.active_object.dimensions[0] * 0.2
-                            if finger_detection_trial == 2:
-                                dist_max = hand_dim_x/10# this helps in case the thumb is straight, generally giving longer distances
+                            if scn.arp_debug_mode:
+                                print("    vert_tip", vert_tip, coords_sorted[0])
+                            
+                            bpy.ops.mesh.select_all(action='DESELECT')
+                            b_mesh.verts[vert_tip].select = True
 
-                            angle_max = 50#50
-                            current_vert = starting_vert
-                            draw_segment = True
-                            edge_dir = "to_root"
-                            tip_index = None
-                            root_index = None
+                            first_finger_tip = vert_tip
 
-                            while draw_segment:                          
-                                def filter_vert_search(_index):
-                                    searched_vert = b_mesh.verts[_index]
-                                    if side_idx == 0:
-                                        dir_compare1 = searched_vert.co[0] < current_vert.co[0]
-                                        dir_compare2 = searched_vert.co[0] > current_vert.co[0]
-                                    if side_idx == 1:# reverse the direction for the right side
-                                        dir_compare1 = searched_vert.co[0] > current_vert.co[0]
-                                        dir_compare2 = searched_vert.co[0] < current_vert.co[0]
+                            if scn.arp_debug_mode:
+                                print("    Found first finger vert", vert_tip)
+                            
+                            # Create edges between verts
+                            #   build the KD Tree used to find the nearest vert to a given one
+                            size = len(b_mesh.verts)
+                            kd = mathutils.kdtree.KDTree(size)
 
-                                    if len(searched_vert.link_edges) == 0 and _index != current_vert.index and ((edge_dir == "to_root" and dir_compare1) or (edge_dir == "to_tip" and dir_compare2)):
-                                        if current_vec != None:
-                                            fac = 1
-                                            #if edge_dir == "to_tip":
-                                            #    fac = 1
+                            for vert_tip, v in enumerate(b_mesh.verts):
+                                kd.insert(v.co, vert_tip)
 
-                                            vec_angle = (fac * current_vec).angle(searched_vert.co - current_vert.co)
+                            kd.balance()
+                            
+                            def get_connected_vert(vert=None, exclude=None):
+                                sel_edge = 0
+                                if len(vert.link_edges) > 1:
+                                    if vert.link_edges[sel_edge].verts[0] == exclude or vert.link_edges[sel_edge].verts[1] == exclude:
+                                        sel_edge = 1
 
-                                            if vec_angle < math.radians(angle_max):
-                                                return True
-                                        else:
-                                            return True
+                                if vert.link_edges[sel_edge].verts[0] != vert:
+                                    return vert.link_edges[sel_edge].verts[0]
+                                else:
+                                    return vert.link_edges[sel_edge].verts[1]
 
-                                    return False
+                            def edgify(starting_vert):
+                                count = 0
+                                dist_max = bpy.context.active_object.dimensions[0] * 0.2
+                                if finger_detection_trial == 2:
+                                    dist_max = hand_dim_x/10# this helps in case the thumb is straight, generally giving longer distances
 
+                                angle_max = 50#50
+                                current_vert = starting_vert
+                                draw_segment = True
+                                edge_dir = "to_root"
+                                tip_index = None
+                                root_index = None
 
-                                def filter_vert_search_2(_index):
-                                    searched_vert = b_mesh.verts[_index]
-                                    if side_idx == 0:
-                                        dir_compare1 = searched_vert.co[0] < current_vert.co[0]
-                                        dir_compare2 = searched_vert.co[0] > current_vert.co[0]
-                                    if side_idx == 1:# reverse the direction for the right side
-                                        dir_compare1 = searched_vert.co[0] > current_vert.co[0]
-                                        dir_compare2 = searched_vert.co[0] < current_vert.co[0]
-
-                                    if len(searched_vert.link_edges) == 0 and _index != current_vert.index and _index != first_iter_vert and ((edge_dir == "to_root" and dir_compare1) or (edge_dir == "to_tip" and dir_compare2)):
-
-                                        if current_vec:
-                                            fac = 1
-                                            #if edge_dir == "to_tip":
-                                            #    fac = 1
-
-                                            vec_angle = (fac * current_vec).angle(searched_vert.co - current_vert.co)
-
-                                            if vec_angle < math.radians(angle_max):
-                                                return True
-                                        else:
-                                            return True
-
-                                    return False
-
-                                # calculate previous edge vector for angle check
-                                current_vec = None
-                                if len(current_vert.link_edges) > 0:
-                                    vert2 = get_connected_vert(current_vert, current_vert)
-                                    current_vec = current_vert.co - vert2.co
-
-                                #else:
-                                #    current_vec = Vector((-1,0,0))
-
-                                # find nearest vert
-                                    # 2 iteration: if the second angle is lower, choose this one
-                                    # 1st
-                                pos, idx, dist = kd.find(current_vert.co, filter=filter_vert_search)
-
-
-                                    # 2nd
-                                if idx != None:
-                                    if current_vec == None:# first vertice, set the vec to X
-                                        current_vec = Vector((-1,0,0))
-
-                                    first_iter_vert = idx
-
-                                    vec1_angle = current_vec.angle(pos - current_vert.co)
-
-                                    pos2, idx2, dist2 = kd.find(current_vert.co, filter=filter_vert_search_2)
-
-                                    if pos2:
-                                        vec2_angle = current_vec.angle(pos2 - current_vert.co)
-                                        angle_diff = degrees(vec1_angle) - degrees(vec2_angle)
-
-                                        if dist2 < dist_max and angle_diff > 5:#5
-                                            # valid vertices, choose this one
-                                            # take into account the non chosen vert as a new edge if it's closer
-                                            if dist2 > dist:
-                                                count += 1
-                                                #print("Adding 1 additional edge count")
-
-                                            invalid_verts.append(idx)
-                                            pos, idx, dist = pos2, idx2, dist2
-
-
-                                chosen_vert = None
-                                shortest_dist = None
-
-                                if pos:
-                                    continue_edge = False
-
-                                    if not restrict_edgify_half_hand:
-
-                                        if dist < dist_max:
-                                            continue_edge = True
-
-                                    if restrict_edgify_half_hand:
+                                while draw_segment:                          
+                                    def filter_vert_search(_index):
+                                        searched_vert = b_mesh.verts[_index]
                                         if side_idx == 0:
-                                            if dist < dist_max and pos[0] > (coords_sorted[0][0] + coords_sorted[len(coords_sorted)-1][0])/2:
+                                            dir_compare1 = searched_vert.co[0] < current_vert.co[0]
+                                            dir_compare2 = searched_vert.co[0] > current_vert.co[0]
+                                        if side_idx == 1:# reverse the direction for the right side
+                                            dir_compare1 = searched_vert.co[0] > current_vert.co[0]
+                                            dir_compare2 = searched_vert.co[0] < current_vert.co[0]
+
+                                        if len(searched_vert.link_edges) == 0 and _index != current_vert.index and ((edge_dir == "to_root" and dir_compare1) or (edge_dir == "to_tip" and dir_compare2)):
+                                            if current_vec != None:
+                                                fac = 1
+                                                #if edge_dir == "to_tip":
+                                                #    fac = 1
+
+                                                vec_angle = (fac * current_vec).angle(searched_vert.co - current_vert.co)
+
+                                                if vec_angle < math.radians(angle_max):
+                                                    return True
+                                            else:
+                                                return True
+
+                                        return False
+
+
+                                    def filter_vert_search_2(_index):
+                                        searched_vert = b_mesh.verts[_index]
+                                        if side_idx == 0:
+                                            dir_compare1 = searched_vert.co[0] < current_vert.co[0]
+                                            dir_compare2 = searched_vert.co[0] > current_vert.co[0]
+                                        if side_idx == 1:# reverse the direction for the right side
+                                            dir_compare1 = searched_vert.co[0] > current_vert.co[0]
+                                            dir_compare2 = searched_vert.co[0] < current_vert.co[0]
+
+                                        if len(searched_vert.link_edges) == 0 and _index != current_vert.index and _index != first_iter_vert and ((edge_dir == "to_root" and dir_compare1) or (edge_dir == "to_tip" and dir_compare2)):
+
+                                            if current_vec:
+                                                fac = 1
+                                                #if edge_dir == "to_tip":
+                                                #    fac = 1
+
+                                                vec_angle = (fac * current_vec).angle(searched_vert.co - current_vert.co)
+
+                                                if vec_angle < math.radians(angle_max):
+                                                    return True
+                                            else:
+                                                return True
+
+                                        return False
+
+                                    # calculate previous edge vector for angle check
+                                    current_vec = None
+                                    if len(current_vert.link_edges) > 0:
+                                        vert2 = get_connected_vert(current_vert, current_vert)
+                                        current_vec = current_vert.co - vert2.co
+
+                                    #else:
+                                    #    current_vec = Vector((-1,0,0))
+
+                                    # find nearest vert
+                                        # 2 iteration: if the second angle is lower, choose this one
+                                        # 1st
+                                    pos, idx, dist = kd.find(current_vert.co, filter=filter_vert_search)
+
+
+                                    #   2nd
+                                    if idx != None:
+                                        if current_vec == None:# first vertice, set the vec to X
+                                            current_vec = Vector((-1,0,0))
+
+                                        first_iter_vert = idx
+
+                                        vec1_angle = current_vec.angle(pos - current_vert.co)
+
+                                        pos2, idx2, dist2 = kd.find(current_vert.co, filter=filter_vert_search_2)
+
+                                        if pos2:
+                                            vec2_angle = current_vec.angle(pos2 - current_vert.co)
+                                            angle_diff = degrees(vec1_angle) - degrees(vec2_angle)
+
+                                            if dist2 < dist_max and angle_diff > 5:#5
+                                                # valid vertices, choose this one
+                                                # take into account the non chosen vert as a new edge if it's closer
+                                                if dist2 > dist:
+                                                    count += 1
+                                                    #print("Adding 1 additional edge count")
+
+                                                invalid_verts.append(idx)
+                                                pos, idx, dist = pos2, idx2, dist2
+
+
+                                    chosen_vert = None
+                                    shortest_dist = None
+
+                                    if pos:
+                                        continue_edge = False
+
+                                        if not restrict_edgify_half_hand:
+
+                                            if dist < dist_max:
                                                 continue_edge = True
 
-                                        if side_idx == 1:
-                                            if dist < dist_max and pos[0] < (coords_sorted[0][0] + coords_sorted[len(coords_sorted)-1][0])/2:
-                                                continue_edge = True
+                                        if restrict_edgify_half_hand:
+                                            if side_idx == 0:
+                                                if dist < dist_max and pos[0] > (coords_sorted[0][0] + coords_sorted[len(coords_sorted)-1][0])/2:
+                                                    continue_edge = True
 
-                                    if continue_edge:
-                                        chosen_vert = idx
+                                            if side_idx == 1:
+                                                if dist < dist_max and pos[0] < (coords_sorted[0][0] + coords_sorted[len(coords_sorted)-1][0])/2:
+                                                    continue_edge = True
 
-                                        if chosen_vert != None:
-                                            # Create edge
-                                            b_mesh.verts.ensure_lookup_table()
-                                            b_mesh.verts[chosen_vert].select = True
+                                        if continue_edge:
+                                            chosen_vert = idx
 
-                                            b_mesh.edges.new((b_mesh.verts[chosen_vert], current_vert))
-                                            current_vert = b_mesh.verts[chosen_vert]
-                                            count += 1
+                                            if chosen_vert != None:
+                                                # Create edge
+                                                b_mesh.verts.ensure_lookup_table()
+                                                b_mesh.verts[chosen_vert].select = True
 
+                                                b_mesh.edges.new((b_mesh.verts[chosen_vert], current_vert))
+                                                current_vert = b_mesh.verts[chosen_vert]
+                                                count += 1
+
+
+                                        else:# reached the end of the segment
+                                            if edge_dir == "to_root":
+                                                edge_dir = "to_tip"
+
+                                                root_index = current_vert.index
+                                                current_vert = starting_vert
+                                            else:
+                                                draw_segment = False
+                                                tip_index = current_vert.index
 
                                     else:# reached the end of the segment
                                         if edge_dir == "to_root":
@@ -3692,130 +5930,369 @@ def _auto_detect(self):
                                             draw_segment = False
                                             tip_index = current_vert.index
 
-                                else:# reached the end of the segment
-                                    if edge_dir == "to_root":
-                                        edge_dir = "to_tip"
 
-                                        root_index = current_vert.index
-                                        current_vert = starting_vert
-                                    else:
-                                        draw_segment = False
-                                        tip_index = current_vert.index
+                                return count, root_index, tip_index
 
 
-                            return count, root_index, tip_index
+                            # Vertice filter search function -------------------------------------------------------
+                            finger_thickness = bpy.context.active_object.dimensions[1]/20
+
+                            def search_left_only(_index):
+                                searched_vert = b_mesh.verts[_index]
+                                dir_compare = (searched_vert.co)[0] > (root_vert.co)[0]
+                                if side_idx == 1:
+                                    dir_compare = (searched_vert.co)[0] < (root_vert.co)[0]
+
+                                return len(searched_vert.link_edges) == 0 and _index != current_vert.index and (searched_vert.co)[1] > (current_vert.co)[1]+finger_thickness and dir_compare and not _index in invalid_verts
+
+                            def search_right_only(_index):
+                                searched_vert = b_mesh.verts[_index]
+                                return len(searched_vert.link_edges) == 0 and _index != current_vert.index and (searched_vert.co)[1] < (current_vert.co)[1]-finger_thickness and not _index in invalid_verts
+
+                            def search_up_only(_index):
+                                searched_vert = b_mesh.verts[_index]
+                                dir_compare = (searched_vert.co)[0] < (current_vert.co)[0]
+                                if side_idx == 1:
+                                    dir_compare = (searched_vert.co)[0] > (current_vert.co)[0]
+
+                                return _index != current_vert.index and dir_compare and not _index in invalid_verts# and len(searched_vert.link_edges) == 0
 
 
-                        # Vertice filter search function -------------------------------------------------------
-                        finger_thickness = bpy.context.active_object.dimensions[1]/20
+                            invalid_verts = []
+                            
+                            # Start processing, first finger (longer)
+                            found_first_finger = False
+                            current_vert = b_mesh.verts[first_finger_tip]
+                            auto_align_phalanges = False
+                            hand_pos_vec = Vector((get_object("hand_loc"+suff).location[0], (wrist_bound_back+wrist_bound_front)/2, get_object("hand_loc"+suff).location[2]))     
+                            hand_pos_offset = hand_pos_vec.copy()
+                            hand_pos_vec = rotate_point(hand_pos_vec, rot_angle_z, Vector((0,0,1)), vectorize3(elbow_empty_loc))
+                            hand_pos_offset = hand_pos_vec - hand_pos_offset
+                            
+                            if fingers_total <= 2:
+                                auto_align_phalanges = True
 
-                        def search_left_only(_index):
-                            searched_vert = b_mesh.verts[_index]
-                            dir_compare = (searched_vert.co)[0] > (root_vert.co)[0]
-                            if side_idx == 1:
-                                dir_compare = (searched_vert.co)[0] < (root_vert.co)[0]
-
-                            return len(searched_vert.link_edges) == 0 and _index != current_vert.index and (searched_vert.co)[1] > (current_vert.co)[1]+finger_thickness and dir_compare and not _index in invalid_verts
-
-                        def search_right_only(_index):
-                            searched_vert = b_mesh.verts[_index]
-                            return len(searched_vert.link_edges) == 0 and _index != current_vert.index and (searched_vert.co)[1] < (current_vert.co)[1]-finger_thickness and not _index in invalid_verts
-
-                        def search_up_only(_index):
-                            searched_vert = b_mesh.verts[_index]
-                            dir_compare = (searched_vert.co)[0] < (current_vert.co)[0]
-                            if side_idx == 1:
-                                dir_compare = (searched_vert.co)[0] > (current_vert.co)[0]
-
-                            return _index != current_vert.index and dir_compare and not _index in invalid_verts# and len(searched_vert.link_edges) == 0
-
-
-                        invalid_verts = []
-                        
-                        # Start processing, first finger (longer)
-                        found_first_finger = False
-                        current_vert = b_mesh.verts[first_finger_tip]
-                        auto_align_phalanges = False
-                        hand_pos_vec = Vector((get_object("hand_loc"+suff).location[0], (wrist_bound_back+wrist_bound_front)/2, get_object("hand_loc"+suff).location[2]))     
-                        hand_pos_offset = hand_pos_vec.copy()
-                        hand_pos_vec = rotate_point(hand_pos_vec, rot_angle_z, Vector((0,0,1)), vectorize3(elbow_empty_loc))
-                        hand_pos_offset = hand_pos_vec - hand_pos_offset
-                        
-                        if fingers_total <= 2:
-                            auto_align_phalanges = True
-
-                        if auto_align_phalanges:
-                            root_pos = (current_vert.co + hand_pos_vec) * 0.5
-                            root_vert = b_mesh.verts.new(root_pos)
-                            b_mesh.verts.index_update()
-
-                            last_vert = current_vert
-                            cast_object = get_object("arp_hand_aligned")
-                            # create verts and edges aligned toward the wrist
-                            for y in range(1,3):
-                                finger_vec = (root_pos- current_vert.co)
-                                vloc = current_vert.co + (finger_vec/3.5) * y
-
-                                # Find the Z pos
-                                have_hit_top = have_hit_bot = False
-                                ray_dir = Vector((0,0,1000000))
-                                ori = Vector((vloc[0], vloc[1], vloc[2] + 2000))
-                                offset = bpy.context.active_object.dimensions[2]*0.005
-                                while not have_hit_top:
-                                    cast_object_eval = bpy.context.evaluated_depsgraph_get().objects.get(cast_object.name, None)
-                                    sucess1, hit_top, normal, index = cast_object_eval.ray_cast(ori, -ray_dir, distance=ray_dir.magnitude)
-                                    if not sucess1:# there's a hole in the mesh, offset the Y position
-
-                                        ori[1] += bpy.context.active_object.dimensions[1]*0.0001
-                                    else:
-                                        have_hit_top = True
-                                        while not have_hit_bot:
-                                            success2, hit_bot, normal, index = cast_object_eval.ray_cast(hit_top + Vector((0,0, -offset)), -ray_dir, distance=ray_dir.magnitude)
-                                            if not success2:# there's a hole in the mesh, offset the Y position
-                                                hit_top[1] += bpy.context.active_object.dimensions[1]*0.0001
-
-                                            else:
-                                                vloc[2] = (hit_top[2] + hit_bot[2])*0.5
-                                                have_hit_bot = True
-
-                                # Create the vert
-                                new_vert = b_mesh.verts.new(vloc)
+                            if auto_align_phalanges:
+                                print("Auto align phalanges...")
+                                #print(br)
+                                root_pos = (current_vert.co + hand_pos_vec) * 0.5
+                                root_vert = b_mesh.verts.new(root_pos)
                                 b_mesh.verts.index_update()
-                                # Create edge
-                                b_mesh.edges.new((last_vert, new_vert))
-                                last_vert = new_vert
 
-                            # Final edge
-                            b_mesh.edges.new((last_vert, root_vert))
+                                last_vert = current_vert
+                                cast_object = get_object("arp_hand_aligned")
+                                
+                                if scn.arp_debug_mode:
+                                    print('create verts and edges aligned toward the wrist')
+                                    
+                                # create verts and edges aligned toward the wrist
+                                for y in range(1,3):
+                                    finger_vec = (root_pos- current_vert.co)
+                                    vloc = current_vert.co + (finger_vec/3.5) * y
+
+                                    # Find the Z pos
+                                    have_hit_top = have_hit_bot = False
+                                    ray_dir = Vector((0,0,1000000))
+                                    ray_dir_neg = 1
+                                    ori = Vector((vloc[0], vloc[1], vloc[2] + 2000))
+                                    ori_base = ori.copy()
+                                    offset = bpy.context.active_object.dimensions[2]*0.005                   
+        
+                                    maxi = 10000
+                                    iter = 0
+                                    trial = 0
+                                    
+                                    while not have_hit_top and iter < maxi:    
+                                        cast_object_eval = bpy.context.evaluated_depsgraph_get().objects.get(cast_object.name, None)
+                                        sucess1, hit_top, normal, index = cast_object_eval.ray_cast(ori, -ray_dir, distance=ray_dir.magnitude)
+                                        if not sucess1:
+                                            if trial == 0:
+                                                if iter < 5000:# there's a hole in the mesh, offset the Y position
+                                                    ori[1] += bpy.context.active_object.dimensions[1]*0.0001
+                                                else:# try other direction
+                                                    iter = 0
+                                                    ori = ori_base.copy()
+                                                    ray_dir_neg = -1
+                                                    trial = 1
+                                                    
+                                            elif trial == 1:
+                                                if iter < 5000:# there's a hole in the mesh, offset the Y position
+                                                    ori[1] -= bpy.context.active_object.dimensions[1]*0.0001
+                                        else:
+                                            if scn.arp_debug_mode:
+                                                print("Success top")
+                                            have_hit_top = True
+                                            iter = 0
+                                            
+                                            while not have_hit_bot and iter < maxi:
+                                                success2, hit_bot, normal, index = cast_object_eval.ray_cast(hit_top + Vector((0,0, -offset)), -ray_dir, distance=ray_dir.magnitude)
+                                                if not success2:# there's a hole in the mesh, offset the Y position
+                                                    hit_top[1] += bpy.context.active_object.dimensions[1]*0.0001*ray_dir_neg
+
+                                                else:
+                                                    if scn.arp_debug_mode:
+                                                        print("Success bot")
+                                                    vloc[2] = (hit_top[2] + hit_bot[2])*0.5
+                                                    have_hit_bot = True
+                                                iter += 1
+                                                
+                                        iter += 1
+                                    
+                                    if scn.arp_debug_mode:
+                                        print("Terminated while")
+                                        
+                                    # Create the vert
+                                    new_vert = b_mesh.verts.new(vloc)
+                                    b_mesh.verts.index_update()
+                                    # Create edge
+                                    b_mesh.edges.new((last_vert, new_vert))
+                                    last_vert = new_vert
+
+                                if scn.arp_debug_mode:
+                                    print("Final edge...")
+                                    
+                                # Final edge
+                                b_mesh.edges.new((last_vert, root_vert))
+                                b_mesh.verts.ensure_lookup_table()
+
+                                root_idx = root_vert.index
+                                tip_idx = first_finger_tip
+
+                                found_first_finger = True
+                                
+                                if scn.arp_debug_mode:
+                                    print("Found first finger", root_vert.index)
+
+
+                            iterate = 0
+                            failed_to_find_first_finger = False
+
+                            while not found_first_finger:
+                                edge_count, root_idx, tip_idx = edgify(b_mesh.verts[first_finger_tip])
+
+                                if edge_count < 3:
+                                    if scn.arp_debug_mode:
+                                        print("    Could not edgify the first finger, try again...")
+
+                                    # Find another close vert
+                                    invalid_verts.append(root_idx)
+                                    invalid_verts.append(first_finger_tip)
+                                    pos, idx, dist = kd.find(b_mesh.verts[first_finger_tip].co, filter=search_up_only)
+
+                                    if idx != None:
+                                        first_finger_tip = idx
+                                    # Fail to find, exit detection
+                                    if idx == None or iterate > 79:
+                                        if finger_detection_trial == 1:
+                                            print("    Fingers detection on side", side, "failed, try again with straight thumb option")
+                                            # delete verts used for detection
+                                            print("    deleting current detection...")
+                                            bpy.ops.object.mode_set(mode='OBJECT')
+                                            bpy.data.objects.remove(get_object("arp_part_verts"), do_unlink=True)
+                                            # restore original particles states
+                                            print("    restoring initial data...")
+                                            set_active_object("arp_hand_aligned")
+                                            bpy.ops.object.mode_set(mode='EDIT')
+                                            b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
+                                            for vloc in particles_vert_loc:
+                                                nv = b_mesh.verts.new(vloc)
+                                                nv.select = True
+
+                                            failed_to_find_first_finger = True
+                                            break
+
+                                        if finger_detection_trial == 2:
+                                            print("    Fingers detection on side", side, "failed")
+                                            if side_idx == 0:
+                                                self.fingers_detection_success_l = False
+                                            if side_idx == 1:
+                                                self.fingers_detection_success_r = False
+
+                                            break
+
+                                else:
+                                    found_first_finger = True
+                                    if scn.arp_debug_mode:
+                                        print("    Found first finger", root_idx)
+                                        
+                                iterate += 1
+
+                            go_upper = True
+                            go_lower = True
+
+                            if failed_to_find_first_finger:
+                                continue# second trial
+
+                        if (self.fingers_detection_success_l and side_idx == 0) or (self.fingers_detection_success_r and side_idx == 1):
                             b_mesh.verts.ensure_lookup_table()
 
-                            root_idx = root_vert.index
-                            tip_idx = first_finger_tip
+                            # Finger list format: ("name", tip index, root index, tip coords, root coords)
+                            fingers_list = [("finger0", tip_idx, root_idx, b_mesh.verts[tip_idx].co.copy(), b_mesh.verts[root_idx].co.copy())]
 
-                            found_first_finger = True
-                            if scene.arp_debug_mode:
-                                print("Found first finger", root_vert.index)
+                            if fingers_total <= 2:
+                                go_upper = False
+                                go_lower = False
 
+                            # Find upper tips
+                            if scn.arp_debug_mode:
+                                if go_upper:
+                                    print("\n    Going up")
 
-                        iterate = 0
-                        failed_to_find_first_finger = False
+                            go_upper_count = 0
+                            current_vert = b_mesh.verts[tip_idx]
+                            root_vert = b_mesh.verts[root_idx]
 
-                        while not found_first_finger:
-                            edge_count, root_idx, tip_idx = edgify(b_mesh.verts[first_finger_tip])
-
-                            if edge_count < 3:
-                                if scene.arp_debug_mode:
-                                    print("    Could not edgify the first finger, try again...")
-
-                                # Find another close vert
-                                invalid_verts.append(root_idx)
-                                invalid_verts.append(first_finger_tip)
-                                pos, idx, dist = kd.find(b_mesh.verts[first_finger_tip].co, filter=search_up_only)
+                            while go_upper:
+                                go_upper_count += 1
+                                pos, idx, dist = kd.find(current_vert.co, filter=search_left_only)
 
                                 if idx != None:
-                                    first_finger_tip = idx
-                                # Fail to find, exit detection
-                                if idx == None or iterate > 79:
+                                    b_mesh.verts[idx].select = True
+                                   # Edgify
+                                    edge_count, root_idx, tip_idx = edgify(b_mesh.verts[idx])
+                                    if edge_count < 4:
+                                        if scn.arp_debug_mode:
+                                            print("    Finger", go_upper_count, "is invalid finger, not enough edges detected")
+                                        invalid_verts.append(idx)
+                                        invalid_verts.append(root_idx)
+                                    else:
+                                        if scn.arp_debug_mode:
+                                            print("    Found finger", go_upper_count, tip_idx)
+
+                                        fingers_list.append(("finger"+str(go_upper_count), tip_idx, root_idx, b_mesh.verts[tip_idx].co.copy(), b_mesh.verts[root_idx].co.copy()))
+                                        current_vert = b_mesh.verts[tip_idx]
+                                        root_vert = b_mesh.verts[root_idx]
+
+                                else:
+                                    go_upper = False
+
+                                 # if found all fingers, exit
+                                if len(fingers_list) == fingers_total:
+                                    go_upper = False
+                                    go_lower = False
+
+
+                            # Go Lower
+                            if scn.arp_debug_mode:
+                                if go_lower:
+                                    print("\n    Going down")
+
+                            go_lower_count = 0
+
+                            while go_lower:
+                                current_vert = b_mesh.verts[first_finger_tip]
+                                go_lower_count += 1
+                                pos, idx, dist = kd.find(current_vert.co, filter=search_right_only)
+
+                                if idx != None:
+                                    b_mesh.verts[idx].select = True
+
+                                   # Edgify
+                                    edge_count, root_idx, tip_idx = edgify(b_mesh.verts[idx])
+
+                                    if edge_count < 5:
+                                        bpy.ops.mesh.select_all(action='DESELECT')
+                                        b_mesh.verts[idx].select = True
+                                        bpy.ops.mesh.select_linked(delimit=set())
+                                        bpy.ops.mesh.delete(type='EDGE_FACE')
+
+                                        if scn.arp_debug_mode:
+                                            print("    Finger", go_lower_count, "is invalid finger, not enough edges detected")
+
+                                    else:
+                                        if scn.arp_debug_mode:
+                                            print("    Found finger", go_lower_count, tip_idx)
+
+                                        fingers_list.append(("finger"+str(go_lower_count), tip_idx, root_idx, b_mesh.verts[tip_idx].co.copy(), b_mesh.verts[root_idx].co.copy()))
+                                        current_vert = b_mesh.verts[tip_idx]
+
+                                else:
+                                    go_lower = False
+
+                                if go_lower_count > 30:
+                                    go_lower = False
+
+                                # if found all fingers, exit
+                                if len(fingers_list) == fingers_total:
+                                    go_lower = False
+
+
+                            # Delete vertices not connected to edges within the fingers thickness value to avoid issues
+                            def find_connected_verts(_index):
+                                searched_vert = b_mesh.verts[_index]
+                                if (searched_vert.co - vert.co).magnitude < finger_thickness:
+                                    if len(searched_vert.link_edges) > 0:
+                                        return True
+
+                                return False
+
+                            b_mesh.verts.ensure_lookup_table()
+
+                            for vert in b_mesh.verts:
+                                if len(vert.link_edges) == 0:
+                                    pos, idx, dist = kd.find(vert.co, filter=find_connected_verts)
+                                    if idx != None and not idx in invalid_verts:
+                                        invalid_verts.append(vert.index)
+                                        if scn.arp_debug_mode:
+                                            print("    APPENDING INVALID", vert.index)
+
+                            # If some fingers haven't been found yet, try again, it's probably the thumb wich is in a tricky place
+                            while len(fingers_list) < fingers_total:
+                                print("\n    Look for the thumb...")
+                                # Look for the bottom vert not linked to edge
+                                bot_bound = None
+                                thumb_tip = None
+
+                                if fingers_total != 2:
+                                    for vert in b_mesh.verts:
+                                        if not vert.index in invalid_verts:
+
+                                            if len(vert.link_edges) == 0:
+                                                coord = vert.co.copy()
+
+                                                if bot_bound == None:
+                                                    bot_bound = coord[1]
+                                                    thumb_tip = vert
+                                                else:
+                                                    thumb_tip_coord = thumb_tip.co.copy()
+
+                                                    if coord[1] < bot_bound:
+                                                        if (coord[0] > thumb_tip_coord[0] and side_idx == 0) or (coord[0] < thumb_tip_coord[0] and side_idx == 1):
+                                                            bot_bound = coord[1]
+                                                            thumb_tip = vert
+
+                                if fingers_total == 2:
+                                    for vert in b_mesh.verts:
+                                        if not vert.index in invalid_verts:
+
+                                            if len(vert.link_edges) == 0:
+                                                coord = vert.co.copy()
+
+                                                if thumb_tip == None:
+                                                    thumb_tip = vert
+                                                else:
+                                                    thumb_tip_coord = thumb_tip.co.copy()
+
+                                                    if coord[1] < thumb_tip_coord[1]:
+                                                        thumb_tip = vert
+
+                                if thumb_tip:
+                                    bpy.ops.mesh.select_all(action='DESELECT')
+
+                                    thumb_tip.select = True
+                                    restrict_edgify_half_hand = False
+                                    edge_count, root_idx, tip_idx = edgify(thumb_tip)
+
+                                    if edge_count < 3:
+                                        if scn.arp_debug_mode:
+                                            print("    Thumb is invalid finger, not enough edges detected")
+                                        invalid_verts.append(root_idx)
+                                    else:
+                                        if scn.arp_debug_mode:
+                                            print("    Found thumb", tip_idx)
+                                        fingers_list.append(("thumb", tip_idx, root_idx, b_mesh.verts[tip_idx].co.copy(), b_mesh.verts[root_idx].co.copy()))
+
+                                else:
                                     if finger_detection_trial == 1:
                                         print("    Fingers detection on side", side, "failed, try again with straight thumb option")
                                         # delete verts used for detection
@@ -3828,495 +6305,288 @@ def _auto_detect(self):
                                         bpy.ops.object.mode_set(mode='EDIT')
                                         b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
                                         for vloc in particles_vert_loc:
+                                            #print("set vertex", vloc)
                                             nv = b_mesh.verts.new(vloc)
                                             nv.select = True
 
-                                        failed_to_find_first_finger = True
                                         break
 
-                                    if finger_detection_trial == 2:
+                                    elif finger_detection_trial == 2:
                                         print("    Fingers detection on side", side, "failed")
                                         if side_idx == 0:
                                             self.fingers_detection_success_l = False
                                         if side_idx == 1:
                                             self.fingers_detection_success_r = False
-
                                         break
 
-                            else:
-                                found_first_finger = True
-                                if scene.arp_debug_mode:
-                                    print("    Found first finger", root_idx)
-                                    
-                            iterate += 1
 
-                        go_upper = True
-                        go_lower = True
-
-                        if failed_to_find_first_finger:
-                            continue# second trial
+                            if len(fingers_list) == fingers_total:
+                                break
 
                     if (self.fingers_detection_success_l and side_idx == 0) or (self.fingers_detection_success_r and side_idx == 1):
-                        b_mesh.verts.ensure_lookup_table()
 
-                        # Finger list format: ("name", tip index, root index, tip coords, root coords)
-                        fingers_list = [("finger0", tip_idx, root_idx, b_mesh.verts[tip_idx].co.copy(), b_mesh.verts[root_idx].co.copy())]
-
-                        if fingers_total <= 2:
-                            go_upper = False
-                            go_lower = False
-
-                        # Find upper tips
-                        if scene.arp_debug_mode:
-                            if go_upper:
-                                print("\n    Going up")
-
-                        go_upper_count = 0
-                        current_vert = b_mesh.verts[tip_idx]
-                        root_vert = b_mesh.verts[root_idx]
-
-                        while go_upper:
-                            go_upper_count += 1
-                            pos, idx, dist = kd.find(current_vert.co, filter=search_left_only)
-
-                            if idx != None:
-                                b_mesh.verts[idx].select = True
-                               # Edgify
-                                edge_count, root_idx, tip_idx = edgify(b_mesh.verts[idx])
-                                if edge_count < 4:
-                                    if scene.arp_debug_mode:
-                                        print("    Finger", go_upper_count, "is invalid finger, not enough edges detected")
-                                    invalid_verts.append(idx)
-                                    invalid_verts.append(root_idx)
-                                else:
-                                    if scene.arp_debug_mode:
-                                        print("    Found finger", go_upper_count, tip_idx)
-
-                                    fingers_list.append(("finger"+str(go_upper_count), tip_idx, root_idx, b_mesh.verts[tip_idx].co.copy(), b_mesh.verts[root_idx].co.copy()))
-                                    current_vert = b_mesh.verts[tip_idx]
-                                    root_vert = b_mesh.verts[root_idx]
-
-                            else:
-                                go_upper = False
-
-                             # if found all fingers, exit
-                            if len(fingers_list) == fingers_total:
-                                go_upper = False
-                                go_lower = False
-
-
-                        # Go Lower
-                        if scene.arp_debug_mode:
-                            if go_lower:
-                                print("\n    Going down")
-
-                        go_lower_count = 0
-
-                        while go_lower:
-                            current_vert = b_mesh.verts[first_finger_tip]
-                            go_lower_count += 1
-                            pos, idx, dist = kd.find(current_vert.co, filter=search_right_only)
-
-                            if idx != None:
-                                b_mesh.verts[idx].select = True
-
-                               # Edgify
-                                edge_count, root_idx, tip_idx = edgify(b_mesh.verts[idx])
-
-                                if edge_count < 5:
-                                    bpy.ops.mesh.select_all(action='DESELECT')
-                                    b_mesh.verts[idx].select = True
-                                    bpy.ops.mesh.select_linked(delimit=set())
-                                    bpy.ops.mesh.delete(type='EDGE_FACE')
-
-                                    if scene.arp_debug_mode:
-                                        print("    Finger", go_lower_count, "is invalid finger, not enough edges detected")
-
-                                else:
-                                    if scene.arp_debug_mode:
-                                        print("    Found finger", go_lower_count, tip_idx)
-
-                                    fingers_list.append(("finger"+str(go_lower_count), tip_idx, root_idx, b_mesh.verts[tip_idx].co.copy(), b_mesh.verts[root_idx].co.copy()))
-                                    current_vert = b_mesh.verts[tip_idx]
-
-                            else:
-                                go_lower = False
-
-                            if go_lower_count > 30:
-                                go_lower = False
-
-                            # if found all fingers, exit
-                            if len(fingers_list) == fingers_total:
-                                go_lower = False
-
-
-                        # Delete vertices not connected to edges within the fingers thickness value to avoid issues
-                        def find_connected_verts(_index):
-                            searched_vert = b_mesh.verts[_index]
-                            if (searched_vert.co - vert.co).magnitude < finger_thickness:
-                                if len(searched_vert.link_edges) > 0:
-                                    return True
-
-                            return False
-
-                        b_mesh.verts.ensure_lookup_table()
-
-                        for vert in b_mesh.verts:
-                            if len(vert.link_edges) == 0:
-                                pos, idx, dist = kd.find(vert.co, filter=find_connected_verts)
-                                if idx != None and not idx in invalid_verts:
-                                    invalid_verts.append(vert.index)
-                                    if scene.arp_debug_mode:
-                                        print("    APPENDING INVALID", vert.index)
-
-                        # If some fingers haven't been found yet, try again, it's probably the thumb wich is in a tricky place
-                        while len(fingers_list) < fingers_total:
-                            print("\n    Look for the thumb...")
-                            # Look for the bottom vert not linked to edge
-                            bot_bound = None
-                            thumb_tip = None
-
-                            if fingers_total != 2:
-                                for vert in b_mesh.verts:
-                                    if not vert.index in invalid_verts:
-
-                                        if len(vert.link_edges) == 0:
-                                            coord = vert.co.copy()
-
-                                            if bot_bound == None:
-                                                bot_bound = coord[1]
-                                                thumb_tip = vert
-                                            else:
-                                                thumb_tip_coord = thumb_tip.co.copy()
-
-                                                if coord[1] < bot_bound:
-                                                    if (coord[0] > thumb_tip_coord[0] and side_idx == 0) or (coord[0] < thumb_tip_coord[0] and side_idx == 1):
-                                                        bot_bound = coord[1]
-                                                        thumb_tip = vert
-
-                            if fingers_total == 2:
-                                for vert in b_mesh.verts:
-                                    if not vert.index in invalid_verts:
-
-                                        if len(vert.link_edges) == 0:
-                                            coord = vert.co.copy()
-
-                                            if thumb_tip == None:
-                                                thumb_tip = vert
-                                            else:
-                                                thumb_tip_coord = thumb_tip.co.copy()
-
-                                                if coord[1] < thumb_tip_coord[1]:
-                                                    thumb_tip = vert
-
-                            if thumb_tip:
-                                bpy.ops.mesh.select_all(action='DESELECT')
-
-                                thumb_tip.select = True
-                                restrict_edgify_half_hand = False
-                                edge_count, root_idx, tip_idx = edgify(thumb_tip)
-
-                                if edge_count < 3:
-                                    if scene.arp_debug_mode:
-                                        print("    Thumb is invalid finger, not enough edges detected")
-                                    invalid_verts.append(root_idx)
-                                else:
-                                    if scene.arp_debug_mode:
-                                        print("    Found thumb", tip_idx)
-                                    fingers_list.append(("thumb", tip_idx, root_idx, b_mesh.verts[tip_idx].co.copy(), b_mesh.verts[root_idx].co.copy()))
-
-                            else:
-                                if finger_detection_trial == 1:
-                                    print("    Fingers detection on side", side, "failed, try again with straight thumb option")
-                                    # delete verts used for detection
-                                    print("    deleting current detection...")
-                                    bpy.ops.object.mode_set(mode='OBJECT')
-                                    bpy.data.objects.remove(get_object("arp_part_verts"), do_unlink=True)
-                                    # restore original particles states
-                                    print("    restoring initial data...")
-                                    set_active_object("arp_hand_aligned")
-                                    bpy.ops.object.mode_set(mode='EDIT')
-                                    b_mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
-                                    for vloc in particles_vert_loc:
-                                        #print("set vertex", vloc)
-                                        nv = b_mesh.verts.new(vloc)
-                                        nv.select = True
-
-                                    break
-
-                                elif finger_detection_trial == 2:
-                                    print("    Fingers detection on side", side, "failed")
-                                    if side_idx == 0:
-                                        self.fingers_detection_success_l = False
-                                    if side_idx == 1:
-                                        self.fingers_detection_success_r = False
-                                    break
-
-
-                        if len(fingers_list) == fingers_total:
-                            break
-
-                if (self.fingers_detection_success_l and side_idx == 0) or (self.fingers_detection_success_r and side_idx == 1):
-
-                    print("    Fingers", side, "have been fully detected")
-                    
-                    # Re order from top to bottom, based on Y position
-                    fingers_list = sorted(fingers_list, reverse=True, key=lambda x: x[3][1])
-
-                    if fingers_total != 2:
-                        # make sure the smaller X value is the thumb
-                        if side_idx == 0:
-                            fingers_x_sort = sorted(fingers_list, reverse=False, key=lambda x: x[3][0])                   
-                        if side_idx == 1:# revert order for the right side
-                            fingers_x_sort = sorted(fingers_list, reverse=True, key=lambda x: x[3][0])
-
+                        print("    Fingers", side, "have been fully detected")
                         
-                        thumb_index = fingers_list.index(fingers_x_sort[0])
-                      
-                        if thumb_index > 1:# avoid confusion with pinky/ring
-                            fingers_list.pop(thumb_index)
-                            fingers_list.insert(len(fingers_list), fingers_x_sort[0])                    
-                        else:
-                            print("    Skip thumb re-order, could be pinky or ring")
+                        # Re order from top to bottom, based on Y position
+                        fingers_list = sorted(fingers_list, reverse=True, key=lambda x: x[3][1])
+
+                        if fingers_total != 2:
+                            # make sure the smaller X value is the thumb
+                            if side_idx == 0:
+                                fingers_x_sort = sorted(fingers_list, reverse=False, key=lambda x: x[3][0])                   
+                            if side_idx == 1:# revert order for the right side
+                                fingers_x_sort = sorted(fingers_list, reverse=True, key=lambda x: x[3][0])
+
                             
-
-                    
-                    # Rename the fingers according to the sorted list
-                    fingers_names = ["pinky", "ring", "middle", "index", "thumb"]
-
-                    # if 4 fingers only to detect, remove the pinky
-                    if fingers_total <= 4:
-                        fingers_names.pop(0)
-                    if fingers_total <= 3:
-                        fingers_names.pop(0)
-                    if fingers_total <= 2:
-                        fingers_names.pop(0)
-                    if fingers_total == 1:
-                        fingers_names.pop(1)
-                        
-                    #print("fingers_names", fingers_names)
-
-                    for fi, name in enumerate(fingers_names):
-                        #print(fingers_list[fi][0])
-                        fingers_list[fi] = (name, fingers_list[fi][1], fingers_list[fi][2], fingers_list[fi][3], fingers_list[fi][4])
-                  
-                    #print("fingers_list", fingers_list)
-                    # Ensure the tip vert reaches the tip mesh surface
-                    for fi, finger in enumerate(fingers_list):
-                        vert_idx = finger[1]
-                        current_vert = b_mesh.verts[vert_idx]
-                        vert2 = get_connected_vert(current_vert, current_vert)
-                        ray_dir = vert2.co - current_vert.co
-                        hand_obj_eval = bpy.context.evaluated_depsgraph_get().objects.get(hand_obj.name, None)
-                        hit, loc, norm, face = hand_obj_eval.ray_cast(current_vert.co, -ray_dir)
-                        if hit:
-                            current_vert.co = loc
-                            # update the fingers list
-                            fingers_list[fi] = (fingers_list[fi][0], fingers_list[fi][1], fingers_list[fi][2], loc, fingers_list[fi][4])
-
-
-                    # resample at a higher rate for better phalanges position
-                    bpy.ops.mesh.select_all(action='SELECT')
-                    bpy.ops.mesh.subdivide(smoothness=0)
-                    if fingers_total <= 2:
-                        bpy.ops.mesh.subdivide(smoothness=0)
-                    b_mesh.verts.ensure_lookup_table()
-
-
-                    # get the fingers length
-                    fingers_length = []
-                    b_mesh.edges.ensure_lookup_table()
-
-                    for fi, finger in enumerate(fingers_list):
-                        current_vert = b_mesh.verts[finger[1]]
-                        previous_vert = None
-                        total_length = 0.0
-                        progress = True
-                        start = True
-
-                        while progress:
-                            if len(current_vert.link_edges) > 1 or start == True:# break the loop if the end is reached
-
-                                new_vert = get_connected_vert(vert=current_vert, exclude=previous_vert)
-                                previous_vert = current_vert
-                                current_vert = new_vert
-
-                                total_length += (previous_vert.co-current_vert.co).magnitude
-                                start = False
-
+                            thumb_index = fingers_list.index(fingers_x_sort[0])
+                          
+                            if thumb_index > 1:# avoid confusion with pinky/ring
+                                fingers_list.pop(thumb_index)
+                                fingers_list.insert(len(fingers_list), fingers_x_sort[0])                    
                             else:
-                                progress = False
+                                print("    Skip thumb re-order, could be pinky or ring")
+                                
 
-                                fingers_length.append(total_length)
+                        
+                        # Rename the fingers according to the sorted list
+                        fingers_names = ["pinky", "ring", "middle", "index", "thumb"]
 
-                    if scene.arp_debug_mode:
-                        print("\n    Fingers length:")
-                        for fi in fingers_length:
-                            print("    ", fi)
+                        if fingers_total == 4:# remove the index
+                            fingers_names = ["pinky", "ring", "middle", "thumb"]
+                        if fingers_total == 3:
+                            fingers_names = ["pinky", "ring", "thumb"]
+                        if fingers_total == 2:
+                            fingers_names = ["index", "thumb"]
+                        if fingers_total == 1:
+                            fingers_names = ["index"]
+                            
+                        #print("fingers_names", fingers_names)
 
-                    # Place the phalanges
-                    #print("    Phalanges...")
-                    phalanges_pos = []
-
-                    # find the phalanges pos
-                    for fi, finger in enumerate(fingers_list):
-                        current_vert = b_mesh.verts[finger[1]]
-                        previous_vert = None
-                        current_length = 0.0
-                        total_length = fingers_length[fi]
-                        progress = True
-                        start = True
-                        found_phal_1 = False
-                        found_phal_2 = False
-
-                        while progress:
-
-                            if len(current_vert.link_edges) > 1 or start == True:# break the loop if the end is reached
-
-                                new_vert = get_connected_vert(vert=current_vert, exclude=previous_vert)
-                                previous_vert = current_vert
-                                current_vert = new_vert
-
-                                current_length += (previous_vert.co-current_vert.co).magnitude
-                                start = False
-
-                                if current_length >= total_length/3 and found_phal_1 == False:
-                                    found_phal_1 = True
-                                    phalanges_pos.append((finger[0], current_vert.co.copy()))
+                        for fi, name in enumerate(fingers_names):
+                            #print(fingers_list[fi][0])
+                            fingers_list[fi] = (name, fingers_list[fi][1], fingers_list[fi][2], fingers_list[fi][3], fingers_list[fi][4])
+                      
+                        #print("fingers_list", fingers_list)
+                        # Ensure the tip vert reaches the tip mesh surface
+                        for fi, finger in enumerate(fingers_list):
+                            vert_idx = finger[1]
+                            current_vert = b_mesh.verts[vert_idx]
+                            vert2 = get_connected_vert(current_vert, current_vert)
+                            ray_dir = vert2.co - current_vert.co
+                            hand_obj_eval = bpy.context.evaluated_depsgraph_get().objects.get(hand_obj.name, None)
+                            hit, loc, norm, face = hand_obj_eval.ray_cast(current_vert.co, -ray_dir)
+                            if hit:
+                                current_vert.co = loc
+                                # update the fingers list
+                                fingers_list[fi] = (fingers_list[fi][0], fingers_list[fi][1], fingers_list[fi][2], loc, fingers_list[fi][4])
 
 
-                                if current_length >= (total_length/3)*2 and found_phal_2 == False:
-                                    found_phal_2 = True
+                        # resample at a higher rate for better phalanges position
+                        bpy.ops.mesh.select_all(action='SELECT')
+                        bpy.ops.mesh.subdivide(smoothness=0)
+                        if fingers_total <= 2:
+                            bpy.ops.mesh.subdivide(smoothness=0)
+                        b_mesh.verts.ensure_lookup_table()
+
+
+                        # get the fingers length
+                        fingers_length = []
+                        b_mesh.edges.ensure_lookup_table()
+
+                        for fi, finger in enumerate(fingers_list):
+                            current_vert = b_mesh.verts[finger[1]]
+                            previous_vert = None
+                            total_length = 0.0
+                            progress = True
+                            start = True
+
+                            while progress:
+                                if len(current_vert.link_edges) > 1 or start == True:# break the loop if the end is reached
+
+                                    new_vert = get_connected_vert(vert=current_vert, exclude=previous_vert)
+                                    previous_vert = current_vert
+                                    current_vert = new_vert
+
+                                    total_length += (previous_vert.co-current_vert.co).magnitude
+                                    start = False
+
+                                else:
                                     progress = False
-                                    if not finger[0] == "thumb":
+
+                                    fingers_length.append(total_length)
+
+                        if scn.arp_debug_mode:
+                            print("\n    Fingers length:")
+                            for fi in fingers_length:
+                                print("    ", fi)
+
+                        # Place the phalanges
+                        #print("    Phalanges...")
+                        phalanges_pos = []
+
+                        # find the phalanges pos
+                        for fi, finger in enumerate(fingers_list):
+                            current_vert = b_mesh.verts[finger[1]]
+                            previous_vert = None
+                            current_length = 0.0
+                            total_length = fingers_length[fi]
+                            progress = True
+                            start = True
+                            found_phal_1 = False
+                            found_phal_2 = False
+
+                            while progress:
+
+                                if len(current_vert.link_edges) > 1 or start == True:# break the loop if the end is reached
+
+                                    new_vert = get_connected_vert(vert=current_vert, exclude=previous_vert)
+                                    previous_vert = current_vert
+                                    current_vert = new_vert
+
+                                    current_length += (previous_vert.co-current_vert.co).magnitude
+                                    start = False
+
+                                    if current_length >= total_length/3 and found_phal_1 == False:
+                                        found_phal_1 = True
                                         phalanges_pos.append((finger[0], current_vert.co.copy()))
 
-                                    else:# for the thumb, the root is the 2nd phalange
-                                        phalanges_pos.append((finger[0], finger[4]))
 
-                            else:
-                                progress = False
-                                fingers_length.append(total_length)
+                                    if current_length >= (total_length/3)*2 and found_phal_2 == False:
+                                        found_phal_2 = True
+                                        progress = False
+                                        if not finger[0] == "thumb":
+                                            phalanges_pos.append((finger[0], current_vert.co.copy()))
+
+                                        else:# for the thumb, the root is the 2nd phalange
+                                            phalanges_pos.append((finger[0], finger[4]))
+
+                                else:
+                                    progress = False
+                                    fingers_length.append(total_length)
 
 
 
-                    # Place the fingers master root
-                    #print("\n    Root positions...")
-                    fingers_root_list = []
-                    
-                    # get wrist center
-                    wrist_bound_back = wrist_bound_back + (wrist_bound_front-wrist_bound_back) * 0.3                
-                    wrist_bound_front = wrist_bound_front + (wrist_bound_back-wrist_bound_front) * 0.3
-                    
-                    # move to t-pose
-                    wrist_bound_back += hand_pos_offset[1]
-                    wrist_bound_front += hand_pos_offset[1]
-                    
-                    wrist_vec = wrist_bound_front-wrist_bound_back      
-                    
-                    for fi, finger in enumerate(fingers_list):
-                        if finger[0] != "thumb":                      
-                            pos = hand_pos_vec + (finger[4] - hand_pos_vec) * 0.3                                       
-                            pos[1] = (finger[4][1] + (wrist_bound_back + wrist_vec * fi * 0.25)) * 0.5
-                        else:
-                            pos = (finger[4] + hand_pos_vec) * 0.5
-
-                        fingers_root_list.append((finger[0]+"_root", pos))
+                        # Place the fingers master root
+                        #print("\n    Root positions...")
+                        fingers_root_list = []
                         
+                        # get wrist center
+                        wrist_bound_back = wrist_bound_back + (wrist_bound_front-wrist_bound_back) * 0.3                
+                        wrist_bound_front = wrist_bound_front + (wrist_bound_back-wrist_bound_front) * 0.3
+                        
+                        # move to t-pose
+                        wrist_bound_back += hand_pos_offset[1]
+                        wrist_bound_front += hand_pos_offset[1]
+                        
+                        wrist_vec = wrist_bound_front-wrist_bound_back      
+                        
+                        for fi, finger in enumerate(fingers_list):
+                            if finger[0] != "thumb":                      
+                                pos = hand_pos_vec + (finger[4] - hand_pos_vec) * 0.3                                       
+                                pos[1] = (finger[4][1] + (wrist_bound_back + wrist_vec * fi * 0.25)) * 0.5
+                            else:
+                                pos = (finger[4] + hand_pos_vec) * 0.5
 
-                    # Refine pass 1: smoothen the wrist-fingers root distance
-                    average_dist = 0.0
-                    count = 0
-                    for fi, finger in enumerate(fingers_list):
-                        if finger[0] == "pinky" or finger[0] == "ring" or finger[0] == "middle" or finger[0] == "index":
-                            average_dist += (hand_pos_vec - fingers_list[fi][4]).magnitude
-                            count += 1
+                            fingers_root_list.append((finger[0]+"_root", pos))
+                            
 
-                    if len(fingers_list) > 2:
-                        average_dist /= count
-                    else:
-                        average_dist = (fingers_list[0][4] - hand_pos_vec).magnitude
+                        # Refine pass 1: smoothen the wrist-fingers root distance
+                        average_dist = 0.0
+                        count = 0
+                        for fi, finger in enumerate(fingers_list):
+                            if finger[0] == "pinky" or finger[0] == "ring" or finger[0] == "middle" or finger[0] == "index":
+                                average_dist += (hand_pos_vec - fingers_list[fi][4]).magnitude
+                                count += 1
 
-                    # dict storing the root original pos and reposition vec
-                    root_move_vec = {}
+                        if len(fingers_list) > 2:
+                            average_dist /= count
+                        else:
+                            average_dist = (fingers_list[0][4] - hand_pos_vec).magnitude
 
-                    for fi, finger in enumerate(fingers_list):
-                        if finger[0] != "thumb":
-                            dir = (fingers_list[fi][4] - hand_pos_vec).normalized()
-                            pos = hand_pos_vec + dir * average_dist * 0.9# 0.9 to move them back a little, they're generally too forward
-                            root_move_vec[finger[0]] = (fingers_list[fi][4], pos - fingers_list[fi][4])
-                            fingers_list[fi] = (fingers_list[fi][0], fingers_list[fi][1], fingers_list[fi][2], fingers_list[fi][3], pos)
+                        # dict storing the root original pos and reposition vec
+                        root_move_vec = {}
+
+                        for fi, finger in enumerate(fingers_list):
+                            if finger[0] != "thumb":
+                                dir = (fingers_list[fi][4] - hand_pos_vec).normalized()
+                                pos = hand_pos_vec + dir * average_dist * 0.9# 0.9 to move them back a little, they're generally too forward
+                                root_move_vec[finger[0]] = (fingers_list[fi][4], pos - fingers_list[fi][4])
+                                fingers_list[fi] = (fingers_list[fi][0], fingers_list[fi][1], fingers_list[fi][2], fingers_list[fi][3], pos)
 
 
-                    # Refine pass 2: re-position the phalanges
-                    for fi in range(0, len(phalanges_pos), 2):
-                        finger_name = phalanges_pos[fi+1][0]
-                        if finger_name != "thumb":
-                            phal1_pos = phalanges_pos[fi+1][1]
-                            phal1_vec = root_move_vec[finger_name][0] - phal1_pos
-                            d = (root_move_vec[finger_name][1].magnitude)*0.4
-                            d = clamp_max(d, phal1_vec.magnitude)
-                            phal1_pos = phal1_pos + phal1_vec.normalized()*d
+                        # Refine pass 2: re-position the phalanges
+                        for fi in range(0, len(phalanges_pos), 2):
+                            finger_name = phalanges_pos[fi+1][0]
+                            if finger_name != "thumb":
+                                phal1_pos = phalanges_pos[fi+1][1]
+                                phal1_vec = root_move_vec[finger_name][0] - phal1_pos
+                                d = (root_move_vec[finger_name][1].magnitude)*0.4
+                                d = clamp_max(d, phal1_vec.magnitude)
+                                phal1_pos = phal1_pos + phal1_vec.normalized()*d
 
-                            # update the phalange list
-                            phalanges_pos[fi+1] = (phalanges_pos[fi+1][0], phal1_pos)                       
+                                # update the phalange list
+                                phalanges_pos[fi+1] = (phalanges_pos[fi+1][0], phal1_pos)                       
 
-                    # Create an empty for detected position
-                    #print("    Create empties loc...")
+                        # Create an empty for detected position
+                        #print("    Create empties loc...")
+                        bpy.ops.object.mode_set(mode='OBJECT')
+                        
+                        for f_i, finger in enumerate(fingers_list):
+                            # tip
+                            create_empty_loc(0.02, finger[3], finger[0] + "_top"+side)
+
+                            # root
+                            create_empty_loc(0.02, finger[4], finger[0] + "_bot"+side)
+
+                            # master root
+                            create_empty_loc(0.02, fingers_root_list[f_i][1], fingers_root_list[f_i][0]+side)
+
+                        for fi in range(0, len(phalanges_pos), 2):
+                            # phalange 1
+                            create_empty_loc(0.02, phalanges_pos[fi][1], phalanges_pos[fi][0] + "_phal_1"+side)
+                     
+                            # phalange 2
+                            create_empty_loc(0.02, phalanges_pos[fi+1][1], phalanges_pos[fi+1][0] + "_phal_2"+side)
+                        
+                    
+                    # --End if scn.arp_fingers_to_detect != 0
+                    bpy.ops.object.mode_set(mode='OBJECT')
+
+                    # rotate the empties back to original coords
+                    scn.cursor.location = shoulder_pos
+                    bpy.ops.object.select_all(action='DESELECT')
+                    
+                    rot_angle_x = arm_angle_x * rot_fac
+                    rot_angle_z = -forearm_angle_z * rot_fac
+                    for obj in get_object("auto_detect_loc").children:
+                        if ("pinky" in obj.name or "ring" in obj.name or "middle" in obj.name or "index" in obj.name or "thumb" in obj.name) and side in obj.name:
+                            rotate_object(obj, rot_angle_z, Vector((0,0,1)), vectorize3(elbow_empty_loc))
+                            bpy.ops.object.mode_set(mode='OBJECT')
+                            rotate_object(obj, rot_angle_x, Vector((0,1,0)), shoulder_pos)                               
+                           
+                    rotate_object(get_object('hand_loc'+suff), rot_angle_x, Vector((0,1,0)), shoulder_pos)   
+
                     bpy.ops.object.mode_set(mode='OBJECT')
                     
-                    for f_i, finger in enumerate(fingers_list):
-                        # tip
-                        create_empty_loc(0.02, finger[3], finger[0] + "_top"+side)
+                    #delete arp_hand_aligned
+                    bpy.data.objects.remove(get_object("arp_hand_aligned"), do_unlink=True)
 
-                        # root
-                        create_empty_loc(0.02, finger[4], finger[0] + "_bot"+side)
+                    # delete arp_part_verts objects
+                    if get_object("arp_part_verts"):
+                        bpy.data.objects.remove(get_object("arp_part_verts"), do_unlink=True)
 
-                        # master root
-                        create_empty_loc(0.02, fingers_root_list[f_i][1], fingers_root_list[f_i][0]+side)
-
-                    for fi in range(0, len(phalanges_pos), 2):
-                        # phalange 1
-                        create_empty_loc(0.02, phalanges_pos[fi][1], phalanges_pos[fi][0] + "_phal_1"+side)
-                 
-                        # phalange 2
-                        create_empty_loc(0.02, phalanges_pos[fi+1][1], phalanges_pos[fi+1][0] + "_phal_2"+side)
-                    
-                
-                # --End if scene.arp_fingers_to_detect != 0
+                    # delete the selection helper
+                    if get_object("arp_hand_transform"):
+                        bpy.data.objects.remove(get_object("arp_hand_transform"), do_unlink=True)
+                        
+                else:
+                    print("Too low poly, could not find the wrist vertices")
+                    scn.arp_fingers_to_detect = 0
+             
+            if bpy.context.active_object:
                 bpy.ops.object.mode_set(mode='OBJECT')
-
-                # rotate the empties back to original coords
-                scene.cursor.location = shoulder_pos
-                bpy.ops.object.select_all(action='DESELECT')
-                
-                rot_angle_x = arm_angle_x * rot_fac
-                rot_angle_z = -forearm_angle_z * rot_fac
-                for obj in get_object("auto_detect_loc").children:
-                    if ("pinky" in obj.name or "ring" in obj.name or "middle" in obj.name or "index" in obj.name or "thumb" in obj.name) and side in obj.name:
-                        rotate_object(obj, rot_angle_z, Vector((0,0,1)), vectorize3(elbow_empty_loc))
-                        bpy.ops.object.mode_set(mode='OBJECT')
-                        rotate_object(obj, rot_angle_x, Vector((0,1,0)), shoulder_pos)                               
-                       
-                rotate_object(get_object('hand_loc'+suff), rot_angle_x, Vector((0,1,0)), shoulder_pos)        
-            
-            bpy.ops.object.mode_set(mode='OBJECT')
             
             create_empty_loc(0.04, _hand_empty_loc, "hand_loc"+side)
-            
-            #delete arp_hand_aligned
-            bpy.data.objects.remove(get_object("arp_hand_aligned"), do_unlink=True)
-
-            # delete arp_part_verts objects
-            if get_object("arp_part_verts"):
-                bpy.data.objects.remove(get_object("arp_part_verts"), do_unlink=True)
-
-            # delete the selection helper
-            if get_object("arp_hand_transform"):
-                bpy.data.objects.remove(get_object("arp_hand_transform"), do_unlink=True)
-
-
-
 
         # Legs detection -------------------------------------------------------------------------
 
@@ -4325,7 +6595,7 @@ def _auto_detect(self):
 
         foot_markers = [foot_loc_l]
 
-        if not scene.arp_smart_sym:
+        if not scn.arp_smart_sym:
             foot_markers.append(foot_loc_r)
 
 
@@ -4395,10 +6665,10 @@ def _auto_detect(self):
             bound_toes_top = -100000
             bound_toes_bot = 1000000                                 
             
-            #find the toes height
+            # find the toes height
             for vi in selected_index:
                 mesh.verts.ensure_lookup_table()
-                #find the toes end vertices
+                # find the toes end vertices
                 vert_co = mesh.verts[vi].co
                 vert_z = mesh.verts[vi].co[2]
 
@@ -4410,7 +6680,7 @@ def _auto_detect(self):
                         bound_toes_bot = vert_z
 
                         
-            #raycast for foot direction
+            # raycast for foot direction
 
             side_fac = 1
             if side_idx == 1:
@@ -4432,7 +6702,7 @@ def _auto_detect(self):
 
                     if compare_x:
                         ray_origin = new_origin
-                        if scene.arp_debug_mode:
+                        if scn.arp_debug_mode:
                             print("Iterating foot ray...")
 
                         if iterate > 60:
@@ -4445,7 +6715,7 @@ def _auto_detect(self):
                         last_hit = hit
                 else:
                     ray_origin = new_origin
-                    if scene.arp_debug_mode:
+                    if scn.arp_debug_mode:
                         print("Iterating foot ray...")
                     if iterate > 60:                      
                         self.error_message = "Could not find the feet, are they on the ground?"
@@ -4455,7 +6725,7 @@ def _auto_detect(self):
                 iterate += 1
 
 
-            if scene.arp_debug_mode:
+            if scn.arp_debug_mode:
                 print('    ray foot origin', ray_origin)
                 print('    ray hit front', hit_front)
 
@@ -4465,7 +6735,7 @@ def _auto_detect(self):
                 
                 if hit != None:
 
-                    #left or right side only
+                    # left or right side only
                     compare_x = hit[0] > 0
                     if side_idx == 1:
                         compare_x = hit[0] < 0
@@ -4476,7 +6746,7 @@ def _auto_detect(self):
 
             hit_back = last_hit
 
-            if scene.arp_debug_mode:
+            if scn.arp_debug_mode:
                 print('    ray hit back', hit_back)
 
             hit_center = (hit_back+hit_front)/2
@@ -4485,44 +6755,47 @@ def _auto_detect(self):
 
             # Ankle
             clear_selection()
+            
+            ankle_depth = foot_marker.location[1]
 
-            ray_origin = vectorize3([foot_marker.location[0], 0, foot_marker.location[2]]) + vectorize3([0, -body_width*2, 0])
-            ray_dir = vectorize3([0, body_width*4, 0])
-            hit_front = None
-            last_hit = None
-            have_hit = False
-
-            while not have_hit:
-                hit, normal, index, distance = my_tree.ray_cast(ray_origin, ray_dir, ray_dir.magnitude)
-                if hit == None:
-                    self.error_during_auto_detect = True
-                    self.error_message = 'Could not find the ankle, marker out of mesh?'
-                    return
-
-                else:
-                    have_hit = True
-                    hit_front = hit
-                    last_hit = hit
-
-            while have_hit:#iterate if multiple polygons layers
+            if not scn.arp_smart_depth:
+                ray_origin = vectorize3([foot_marker.location[0], 0, foot_marker.location[2]]) + vectorize3([0, -body_width*2, 0])
+                ray_dir = vectorize3([0, body_width*4, 0])
+                hit_front = None
+                last_hit = None
                 have_hit = False
-                hit, normal, index, distance = my_tree.ray_cast(last_hit+vectorize3([0, 0.001, 0]), ray_dir, ray_dir.magnitude)
-                if hit != None:
-                    last_hit = hit
-                    have_hit = True
 
-            hit_back = last_hit
+                while not have_hit:
+                    hit, normal, index, distance = my_tree.ray_cast(ray_origin, ray_dir, ray_dir.magnitude)
+                    if hit == None:
+                        self.error_during_auto_detect = True
+                        self.error_message = 'Could not find the ankle, marker out of mesh?'
+                        return
 
-            if scene.arp_debug_mode:
-                print('    ray hit back', hit_back)
+                    else:
+                        have_hit = True
+                        hit_front = hit
+                        last_hit = hit
 
-            hit_center_ankle = (hit_back+hit_front)/2
+                while have_hit:# iterate if multiple polygons layers
+                    have_hit = False
+                    hit, normal, index, distance = my_tree.ray_cast(last_hit+vectorize3([0, 0.001, 0]), ray_dir, ray_dir.magnitude)
+                    if hit != None:
+                        last_hit = hit
+                        have_hit = True
 
-            ankle_empty_loc = [foot_marker.location[0], hit_center_ankle[1], foot_marker.location[2]]
+                hit_back = last_hit
+
+                if scn.arp_debug_mode:
+                    print('    ray hit back', hit_back)
+
+                ankle_depth = ((hit_back + hit_front)/2)[1]
+                
+            ankle_empty_loc = [foot_marker.location[0], ankle_depth, foot_marker.location[2]]
             ankle_endfoot_dist = (vectorize3([ankle_empty_loc[0], bound_front, ankle_empty_loc[2]]) - vectorize3(ankle_empty_loc)).magnitude
 
 
-            if scene.arp_debug_mode:
+            if scn.arp_debug_mode:
                 print("    Find bank bones...\n")
 
             # Bank bones
@@ -4539,21 +6812,21 @@ def _auto_detect(self):
 
             foot_dir = vectorize3([hit_center[0] - ankle_empty_loc[0], hit_center[1] - ankle_empty_loc[1], 0])
 
-            if side == ".l":
-                scene.arp_foot_dir_l = foot_dir
-            if side == ".r":
-                scene.arp_foot_dir_r = foot_dir
+            if side == '.l':
+                scn.arp_foot_dir_l = foot_dir
+            if side == '.r':
+                scn.arp_foot_dir_r = foot_dir
 
-            #find the bank bones in foot direction space
-                #create temp empty object for the coord space calculation
+            # find the bank bones in foot direction space
+            #   create temp empty object for the coord space calculation
             angle_foot = (vectorize3([0,-1,0]).angle(foot_dir))
-            bpy.ops.object.empty_add(type='PLAIN_AXES', radius = 1, location=(0,0,0), rotation=(0, 0, angle_foot*side_fac))
-            
-            # rename it
             foot_dir_space_name = "foot_dir_space"
-            bpy.context.active_object.name = foot_dir_space_name
-            foot_dir_space = get_object(foot_dir_space_name)
-            foot_dir_space.parent = get_object("arp_temp_detection")                                                       
+            foot_dir_space = create_empty(foot_dir_space_name, Vector((0,0,0)))
+            #bpy.ops.object.empty_add(type='PLAIN_AXES', radius = 1, location=(0,0,0), rotation=(0, 0, angle_foot*side_fac))
+            foot_dir_space.rotation_euler = [0, 0, angle_foot*side_fac]
+            #bpy.context.active_object.name = foot_dir_space_name
+            #foot_dir_space = get_object(foot_dir_space_name)
+            foot_dir_space.parent = get_object('arp_temp_detection')                                                       
             
             foot_dir_matrix = foot_dir_space.matrix_world
 
@@ -4648,7 +6921,7 @@ def _auto_detect(self):
 
         print("Find root position...\n")
 
-            # get the loc guides
+        #   get the loc guides
         root_marker = get_object("root_loc")
         set_active_object(body.name)
         bpy.ops.object.mode_set(mode='EDIT')
@@ -4783,14 +7056,16 @@ def _auto_detect(self):
                     
                 print_progress_bar("Verts", vidx, len(vert_sel))
 
-
+        # Todo, skip the depth evaluation if arp_smart_depth is off
+        root_depth = root_marker.location[1] if scn.arp_smart_depth else (hips_back[1]+hips_front[1])/2 
+        
         hips_right = Vector((hips_bound_right, (hips_back[1]+hips_front[1])/2, root_marker.location[2]))
         hips_left = Vector((hips_bound_left, (hips_back[1]+hips_front[1])/2, root_marker.location[2]))
 
-        if scene.arp_smart_sym:
+        if scn.arp_smart_sym:
             hips_left = Vector((-hips_bound_right, (hips_back[1]+hips_front[1])/2, root_marker.location[2]))
 
-        root_empty_loc = [root_marker.location[0], (hips_back[1]+hips_front[1])/2, root_marker.location[2]]
+        root_empty_loc = [root_marker.location[0], root_depth, root_marker.location[2]]
 
 
          # Legs detection --------------------------------------------------------------------------------------------
@@ -4808,13 +7083,21 @@ def _auto_detect(self):
                 hips_side = hips_left
                 ankle_empty_loc = get_object("ankle_loc.r_auto").location
                 side = ".r"
-
+            
             leg_empty_loc = [(hips_side[0])/2, root_empty_loc[1], root_empty_loc[2]]
+            
+            # Todo: skip leg/thigh evaluation if thigh_loc is here
+            thigh_loc_obj = get_object('thigh_loc') if side_idx == 0 else get_object('thigh_loc_sym')
+            if thigh_loc_obj:
+                leg_empty_loc[0], leg_empty_loc[2] = thigh_loc_obj.location[0], thigh_loc_obj.location[2]
+                if scn.arp_smart_depth:
+                    leg_empty_loc[1] = thigh_loc_obj.location[1]
+            
             knee_empty_loc = [(leg_empty_loc[0] + ankle_empty_loc[0])/2, 0, (leg_empty_loc[2] + ankle_empty_loc[2])/2]
             bot_empty_loc = [leg_empty_loc[0], -hips_front[1], leg_empty_loc[2]]
 
             # find the knee boundaries
-            if scene.arp_debug_mode:
+            if scn.arp_debug_mode:
                 print("    Find knee boundaries...\n")
 
             set_active_object(body.name)
@@ -4869,7 +7152,7 @@ def _auto_detect(self):
             have_hit = False
             ray_origin = vectorize3([knee_empty_loc[0], 0, knee_empty_loc[2]]) + vectorize3([0, -body_width*2, 0])
             ray_dir = vectorize3([0, body_width*4, 0])
-                # front
+            #   front
             hit, normal, index, distance = my_tree.ray_cast(ray_origin, ray_dir, ray_dir.magnitude)
             if hit:
                 knee_front_rayc = hit[1]
@@ -4878,7 +7161,7 @@ def _auto_detect(self):
 
             unit_delta = body_depth/100
 
-                # back
+            #   back
             while have_hit:#iterate in case of multiple polygons layers
                 have_hit = False
                 hit, normal, index, distance = my_tree.ray_cast(last_hit+vectorize3([0, unit_delta, 0]), ray_dir, ray_dir.magnitude)
@@ -4895,6 +7178,14 @@ def _auto_detect(self):
                 knee_empty_loc[1] = knee_back + (knee_front - knee_back)*0.75
 
             bpy.ops.object.mode_set(mode='OBJECT')
+            
+            # TODO: skip knee evaluation if knee_loc is here
+            if get_object('knee_loc'):
+                knee_loc_obj = get_object('knee_loc') if side_idx == 0 else get_object('knee_loc_sym')
+                knee_empty_loc[0], knee_empty_loc[2] = knee_loc_obj.location[0], knee_loc_obj.location[2]
+                
+                if scn.arp_smart_depth:                   
+                    knee_empty_loc[1] = knee_loc_obj.location[1]
 
             create_empty_loc(0.04, root_empty_loc, "root_loc")
             create_empty_loc(0.04, leg_empty_loc, "leg_loc"+side)
@@ -4911,54 +7202,45 @@ def _auto_detect(self):
         bpy.ops.object.mode_set(mode='EDIT')
         
         mesh = bmesh.from_edit_mesh(bpy.context.active_object.data)
-
-        # select vertices in the overlapping neck sphere
-        neck_selection = []
+     
         clear_selection()
-
-        has_selected_neck = False
-        sel_dist = body_height / 25
-
-        while has_selected_neck == False:
-            for vb in mesh.verts:
-                if tolerance_check_2(vb.co, neck_loc.location, 0, 2, sel_dist, ".l"):
-                    vb.select = True
-                    neck_selection.append(vb.index)
-                    has_selected_neck = True
-
-            sel_dist *= 2
-
-
-        # find the neck bounds
-        if scene.arp_debug_mode:
+      
+        if scn.arp_debug_mode:
             print("    Find neck boundaries...\n")
 
-        ray_origin = Vector((neck_loc.location[0],-body_depth*2, neck_loc.location[2]))
-        ray_dir = vectorize3([0,body_depth*4,0])
+        if not scn.arp_smart_depth:
+            # find the neck bounds
+            ray_origin = Vector((neck_loc.location[0],-body_depth*2, neck_loc.location[2]))
+            ray_dir = vectorize3([0, body_depth*4, 0])
 
-        hit, normal, index, distance = my_tree.ray_cast(ray_origin, ray_dir, ray_dir.magnitude)
-        neck_back = None
+            hit, normal, index, distance = my_tree.ray_cast(ray_origin, ray_dir, ray_dir.magnitude)
+            neck_back = None
+            
+            if distance == None or distance < 0.001:            
+                self.error_during_auto_detect = True
+                self.error_message = 'Could not find the neck, marker out of mesh?'
+                return
+            else:
+                neck_front = hit
+                have_hit = True
+                last_hit = hit
+                #iterate if multiples faces layers
+                while have_hit:
+                    have_hit = False
+                    hit, normal, index, distance = my_tree.ray_cast(last_hit + vectorize3([0,0.001,0]), ray_dir, ray_dir.magnitude)
+                    if hit != None:
+                        have_hit = True
+                        last_hit = hit
+
+                neck_back = last_hit
         
-        if distance == None or distance < 0.001:            
-            self.error_during_auto_detect = True
-            self.error_message = 'Could not find the neck, marker out of mesh?'
-            return
+        neck_depth = None            
+        if scn.arp_smart_depth:
+            neck_depth = get_object('neck_loc').location[1]
         else:
-            neck_front = hit
-            have_hit = True
-            last_hit = hit
-            #iterate if multiples faces layers
-            while have_hit:
-                have_hit = False
-                hit, normal, index, distance = my_tree.ray_cast(last_hit+vectorize3([0,0.001,0]), ray_dir, ray_dir.magnitude)
-                if hit != None:
-                    have_hit = True
-                    last_hit = hit
-
-            neck_back = last_hit
-       
-        neck_empty_loc = [neck_loc.location[0], neck_back[1] + (neck_front[1]-neck_back[1])*0.45, neck_loc.location[2]]
-
+            neck_depth = neck_back[1] + (neck_front[1]-neck_back[1])*0.45
+            
+        neck_empty_loc = [neck_loc.location[0], neck_depth, neck_loc.location[2]]
 
 
         # Spine 01
@@ -4994,6 +7276,8 @@ def _auto_detect(self):
             spine_01_back = last_hit
 
         spine_01_empty_loc = spine_01_front + (spine_01_back-spine_01_front)*0.65
+        if scn.arp_smart_depth:
+            spine_01_empty_loc[1] = root_depth
 
 
         # Spine 02
@@ -5025,7 +7309,8 @@ def _auto_detect(self):
             spine_02_back = last_hit
 
         spine_02_empty_loc = spine_02_front + (spine_02_back-spine_02_front)*0.65
-
+        if scn.arp_smart_depth:
+            spine_02_empty_loc[1] = root_depth
         
         # Breast
         print("Find breast...\n")
@@ -5050,7 +7335,7 @@ def _auto_detect(self):
         spine_02_back = -1000
         spine_02_front = 1000
 
-        if scene.arp_debug_mode:
+        if scn.arp_debug_mode:
             print("    Find breast boundaries...\n")
 
         for vs in spine_02_selection:
@@ -5076,9 +7361,9 @@ def _auto_detect(self):
     if chin_loc == None:# backward-compatibility, chin was not defined in earlier versions  
         head_height = neck_empty_loc[2] + (body_height - neck_empty_loc[2])*0.25
     else:
-        if scene.arp_smart_type == 'BODY':
-            head_height = chin_loc.location[2] + (body_height - chin_loc.location[2])*0.1
-        elif scene.arp_smart_type == 'FACIAL':
+        if scn.arp_smart_type == 'BODY':
+            head_height = chin_loc.location[2] + (chin_loc.location[2] - neck_loc.location[2])*0.2
+        elif scn.arp_smart_type == 'FACIAL':
             head_height = chin_loc.location[2]
             
         xpos = chin_loc.location[0]
@@ -5100,78 +7385,92 @@ def _auto_detect(self):
     if hit == None:
         print('    Could not find head pos, marker out of mesh?')
     else:
-        chin_loc.location = hit + Vector((0.0, -body_depth*0.01, 0.0))
+        chin_loc.location = hit + Vector((0.0, -body_depth*0.01, 0.0))    
     
-    # raycast the head joint
-    ray_origin = Vector((xpos, -body_depth*2, head_height))
-    ray_dir = vectorize3([0.0, body_depth*4, 0.0])    
+    # head
+    head_tip_loc = get_object('head_tip_loc')
+    head_empty_loc = None
     
-    hit, normal, index, distance = my_tree.ray_cast(ray_origin, ray_dir, ray_dir.magnitude)
-
-    if distance == None or distance < 0.001:
-        print('    Could not find head pos, marker out of mesh?')
-    else:
-        head_front = hit
+    if head_tip_loc and scn.arp_smart_depth:# head tip defined, use it
+        head_empty_loc = [head_tip_loc.location[0], head_tip_loc.location[1], chin_loc.location[2] + (head_tip_loc.location[2]-chin_loc.location[2])*0.15]
         
-        have_hit = True
-        last_hit = hit
-        #iterate if multiples faces layers
-        while have_hit:
-            have_hit = False
-            hit, normal, index, distance = my_tree.ray_cast(last_hit+vectorize3([0,0.001,0]), ray_dir, ray_dir.magnitude)
-            if hit != None:
-                have_hit = True
-                last_hit = hit
-
-        head_back = last_hit
-
-    head_empty_loc = [chin_loc.location[0], head_back[1] + (head_front[1] - head_back[1]) * 0.3, head_height]
-    
-   
-    # get the head top by raycast    
-    ray_dir = Vector((0, body_depth*4, 0))
-    body_top = None
-    head_top = None
-    
-    if scene.arp_smart_type == 'FACIAL':# 'facial only' mode has no toes markers
-        body_top = body.bound_box[1][2]
-    else:
-        body_top = body_height + get_object('toes_end.l_auto').location[2]# add offset if feet above ground
+    else:# head tip marker not there, raycast the head joint
+        ray_origin = Vector((xpos, -body_depth*2, head_height))
+        ray_dir = vectorize3([0.0, body_depth*4, 0.0])    
         
-    ray_ori = Vector((chin_loc.location[0], -body_depth*2, body_top))
-    ray_offset = (body_top-head_height)/100
-    have_hit = False
-    ray_count = 0
-    #print("Ray dir,", ray_dir)
-    #print("Ray origin", ray_ori)
+        hit, normal, index, distance = my_tree.ray_cast(ray_origin, ray_dir, ray_dir.magnitude)
 
-
-    while not have_hit and ray_count < 400:
-        ray_count += 1
-        hit1, normal, index, distance = my_tree.ray_cast(ray_ori - Vector((0,0,ray_offset))*ray_count, ray_dir, ray_dir.magnitude )
-
-        if hit1 != None:
-            have_hit = True
-
-
-    if have_hit:
-        if hit1[2] >= head_height:
-            head_top = hit1
-            print("Found head top by raycast")
+        if distance == None or distance < 0.001:
+            print('    Could not find head pos, marker out of mesh?')
         else:
-            print("Head top by raycast is below the neck, disabling raycast")
-            head_top = Vector((0, 0, body_top))
-            print("")
-    else:
-        print("Raycast failed, head top is the body height")
-        head_top = Vector((chin_loc.location[0], 0, body_top))
+            head_front = hit
+            
+            have_hit = True
+            last_hit = hit
+            #iterate if multiples faces layers
+            while have_hit:
+                have_hit = False
+                hit, normal, index, distance = my_tree.ray_cast(last_hit+vectorize3([0,0.001,0]), ray_dir, ray_dir.magnitude)
+                if hit != None:
+                    have_hit = True
+                    last_hit = hit
 
-    head_end_empty_loc = [chin_loc.location[0], head_empty_loc[1], head_top[2]]
+            head_back = last_hit
+    
+        mid_head_y = (head_front[1] + head_back[1]) * 0.5
+        head_loc_y = head_back[1] + (head_front[1] - head_back[1]) * 0.3 if scn.arp_smart_type == 'FACIAL' else (mid_head_y + neck_empty_loc[1])*0.5
+        head_empty_loc = [chin_loc.location[0], head_loc_y, head_height]
+        
+        
+    # head end
+    head_end_empty_loc = None
+    
+    if head_tip_loc:# head tip defined, use it
+        if scn.arp_smart_depth:
+            head_end_empty_loc = head_tip_loc.location.copy()
+        else:
+            head_end_empty_loc = [head_tip_loc.location[0], head_empty_loc[1], head_tip_loc.location[2]]
+        
+    else:# get the head top by raycast    
+        ray_dir = Vector((0, body_depth*4, 0))
+        body_top = None
+        head_top = None
+        
+        if scn.arp_smart_type == 'FACIAL':# 'facial only' mode has no toes markers
+            body_top = body.bound_box[1][2]
+        else:
+            body_top = body_height + get_object('toes_end.l_auto').location[2]# add offset if feet above ground
+            
+        ray_ori = Vector((chin_loc.location[0], -body_depth*2, body_top))
+        ray_offset = (body_top - head_height)/100
+        have_hit = False
+        ray_count = 0
+
+        while not have_hit and ray_count < 400:
+            ray_count += 1
+            hit1, normal, index, distance = my_tree.ray_cast(ray_ori - Vector((0, 0, ray_offset))*ray_count, ray_dir, ray_dir.magnitude )
+
+            if hit1 != None:
+                have_hit = True
+                
+        if have_hit:
+            if hit1[2] >= head_height:
+                head_top = hit1
+                print("Found head top by raycast")
+            else:
+                print("Head top by raycast is below the neck, disabling raycast")
+                head_top = Vector((0, 0, body_top))
+                print("")
+        else:
+            print("Raycast failed, head top is the body height")
+            head_top = Vector((chin_loc.location[0], 0, body_top))
+
+        head_end_empty_loc = [chin_loc.location[0], head_empty_loc[1], head_top[2]]
 
     # create the empties
     bpy.ops.object.mode_set(mode='OBJECT')
     
-    if scene.arp_smart_type == 'BODY':
+    if scn.arp_smart_type == 'BODY':
         create_empty_loc(0.04, neck_empty_loc, "neck_loc")
         create_empty_loc(0.04, spine_01_empty_loc, "spine_01_loc")
         create_empty_loc(0.04, spine_02_empty_loc, "spine_02_loc")
@@ -5183,12 +7482,12 @@ def _auto_detect(self):
     
 
     # restore pivot mode    
-    scene.tool_settings.transform_pivot_point = pivot_mod
+    scn.tool_settings.transform_pivot_point = pivot_mod
 
     # update hack
     bpy.ops.transform.translate(value=(0, 0, 0))
 
-    if scene.arp_debug_mode:
+    if scn.arp_debug_mode:
         print("End Auto-Detection.\n")
 
 
@@ -5242,7 +7541,54 @@ def _cancel_and_delete_markers():
     if not scene.arp_smart_sym:
         ms = 0
     item.location = [ms, ms, ms]
+    
+    # Add facial options states
+    item = scene.arp_markers_save.add()
+    item.name = "ears_state"
+    val = 1 if scene.arp_smart_ears else 0
+    item.location = [val, val, val]
+    
+    item = scene.arp_markers_save.add()
+    item.name = "eyebrows_state"
+    val = 1 if scene.arp_smart_eyebrows else 0
+    item.location = [val, val, val]
+    
+    item = scene.arp_markers_save.add()
+    item.name = 'nose_state'
+    val = 1 if scene.arp_smart_nose else 0
+    item.location = [val, val, val]
+    
+    item = scene.arp_markers_save.add()
+    item.name = 'cheek_state'
+    val = 1 if scene.arp_smart_cheeks else 0
+    item.location = [val, val, val]
+    
+    item = scene.arp_markers_save.add()
+    item.name = 'eyes_state'
+    val = 1 if scene.arp_smart_eyes else 0
+    item.location = [val, val, val]
+    
+    item = scene.arp_markers_save.add()
+    item.name = 'mouth_state'
+    val = 1 if scene.arp_smart_mouth else 0
+    item.location = [val, val, val]
+    
+    item = scene.arp_markers_save.add()
+    item.name = 'teeth_state'
+    val = 1 if scene.arp_smart_teeth else 0
+    item.location = [val, val, val]
+    
+    item = scene.arp_markers_save.add()
+    item.name = 'tongue_state'
+    val = 1 if scene.arp_smart_tongue else 0
+    item.location = [val, val, val]
+    
+    item = scene.arp_markers_save.add()
+    item.name = 'chin_state'
+    val = 1 if scene.arp_smart_chin else 0
+    item.location = [val, val, val]
 
+    # facial markers
     arp_facial_setup = get_object("arp_facial_setup", view_layer_change=True)
     if arp_facial_setup:
         for vert in arp_facial_setup.data.vertices:
@@ -5288,10 +7634,13 @@ def show_extras(state):
 
     for v in space_view3d:
         v.overlay.show_extras = state
+        # disable normals display, cluttering...
+        v.overlay.show_vertex_normals = v.overlay.show_split_normals = v.overlay.show_face_normals = False
 
 
 def _get_selected_objects():
-    bpy.context.scene.arp_body_name = bpy.context.view_layer.objects.active.name
+    scn = bpy.context.scene
+    scn.arp_body_name = bpy.context.view_layer.objects.active.name
 
     try:
         bpy.context.space_data.overlay.show_relationship_lines= False
@@ -5307,7 +7656,7 @@ def _get_selected_objects():
 
     
     #get character mesh name
-    body = get_object(bpy.context.scene.arp_body_name)
+    body = get_object(scn.arp_body_name)
 
     bpy.ops.object.select_all(action='DESELECT')
     set_active_object(body.name)
@@ -5347,6 +7696,8 @@ def _get_selected_objects():
             if modifier.type == 'ARMATURE':
                 bpy.ops.object.modifier_remove(modifier=modifier.name)
 
+    # make sure the mesh is displayed in a correct grey solid color
+    body.color = [1.0, 1.0 , 1.0, 1.0]
     
     #center front view
     bpy.ops.view3d.view_axis(type='FRONT')
@@ -5393,16 +7744,56 @@ def _get_selected_objects():
     bpy.context.space_data.region_3d.view_perspective = 'ORTHO'
 
     # freeze character selection
-    get_object(bpy.context.scene.arp_body_name).hide_select = True
+    get_object(scn.arp_body_name).hide_select = True
     
     rig = get_object('rig')
     if rig:
         rig.hide_select = True
         rig["arp_smart_selection_hidden"] = True                                        
         hide_object(rig)
+        
+    # check if AI is installed
+    inf_path = get_AI_path()
+    scn.arp_smart_AI_is_installed = os.path.exists(inf_path)
+    
+    scn.arp_smart_fingers_engine = 'AI' if scn.arp_smart_AI_is_installed else 'LEGACY'
 
 
-def update_sym(self,context):
+def remove_fingers_markers():
+    for _s in ['_sym', '']:
+        for fname in ['thumb', 'index', 'middle', 'ring', 'pinky']:
+            for i in range(1, 5):
+                marker_obj = get_object(fname+str(i)+'_loc'+_s)
+                if marker_obj:
+                    # static debug icons if any
+                    children = [c.name for c in marker_obj.children]
+                    for childname in children:
+                        delete_object(get_object(childname))
+                    delete_object(marker_obj)
+                    
+    if get_object('hand_loc'):
+        set_active_object('hand_loc')
+    
+    
+def update_fingers_to_detect(self, context):
+    if context.scene.arp_fingers_to_detect < 4:# AI fingers only for 4-5 fingers for now
+        context.scene.arp_smart_fingers_engine = 'LEGACY'
+        remove_fingers_markers()
+        
+
+def update_fingers_enable(self, context):
+    if context.scene.arp_fingers_enable == False:
+        remove_fingers_markers()
+        
+
+def update_fingers_engine(self, context):
+    if context.scene.arp_smart_fingers_engine == 'LEGACY':
+        remove_fingers_markers()
+    
+    
+def update_sym(self, context):
+    mid_markers =  ['chin', 'head_tip', 'neck', 'root']
+    
     # Mirror the markers or not
     if get_object("arp_markers") != None:
         if len(get_object("arp_markers").children) > 0:
@@ -5420,7 +7811,7 @@ def update_sym(self,context):
                             child.constraints[0].influence = 0.0
                             child.matrix_world = final_mat
                 # center markers
-                if "chin" in child.name or "neck" in child.name or "root" in child.name:
+                if any(n in child.name for n in mid_markers):
                     # lock x-axis
                     if context.scene.arp_smart_sym:
                         child.lock_location[0] = True
@@ -5455,13 +7846,6 @@ def update_sym(self,context):
 
             if curr_mod:# restore mode
                 restore_current_mode(curr_mod)
-    """
-    # Smart facial not yet supported in non-mirror mode. Disable when mirror is off.
-    if not context.scene.arp_smart_sym:
-        if get_object("arp_facial_setup") != None:
-            _cancel_facial_setup()
-    """
-
 
 
 # COLLECTION PROPERTIES DEFINITION
@@ -5483,6 +7867,12 @@ class facial_markers_transform(bpy.types.PropertyGroup):
 # END FUNCTIONS
 
 ###########  UI PANEL  ###################
+
+def get_custom_icon(name):
+    # a user reported an error when loading custom icons on Mac, if multiple Blender versions are installed
+    # due to a disk read permission issue
+    # then return a null id -1 if custom_icons is None
+    return custom_icons[name].icon_id if custom_icons else -1
 
 class ARP_PT_proxy_utils_ui(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
@@ -5507,14 +7897,15 @@ class ARP_PT_proxy_utils_ui(bpy.types.Panel):
         scn = context.scene
         
         # help button
-        if bpy.context.preferences.addons[__package__.split('.')[0]].preferences.beginner_mode:
+        if get_prefs().beginner_mode:
             row = layout.column().row(align=True).split(factor=0.9)        
             row.label(text="")
-            but = row.operator("arp.open_link_internet", text='', icon_value=custom_icons['question'].icon_id)
-            but.link_string = "http://lucky3d.fr/auto-rig-pro/doc/auto_rig.html#smart"
+            but = row.operator("arp.open_link_internet", text='', icon_value=get_custom_icon('question'))
+            but.link_string = ard.doc_url+"auto_rig.html#smart"
         
-        
+            
         button_state = 0
+        button_opt_state = 0
 
         #BUTTONS
         arp_facial_is_there = True if get_object('arp_facial_setup') else False
@@ -5531,37 +7922,120 @@ class ARP_PT_proxy_utils_ui(bpy.types.Panel):
                     button_state = 4
                 if get_object("hand_loc"):
                     button_state = 5
-                if get_object("root_loc"):
+                    if scn.arp_smart_depth == False:# skip hand tip if depth is disabled
+                        button_state = 6
+                if get_object("hand_tip_loc"):
                     button_state = 6
+                if get_object("root_loc"):
+                    button_state = 7
                 if get_object("foot_loc"):
-                    button_state = 7                            
+                    button_state = 8
+                
+                #if get_object('thigh_loc'):
+                #    button_opt_state = 1
+                #if get_object('knee_loc'):
+                #    button_opt_state = 2
+                #if get_object('elbow_loc'):
+                #    button_opt_state = 3
+
             elif scn.arp_smart_type == 'FACIAL':
                 if get_object("chin_loc"):
-                    button_state = 7                        
+                    button_state = 8                
             if arp_facial_is_there:
                 if is_object_hidden(get_object('arp_facial_setup')) == False:
-                    button_state = 8
+                    button_state = 9
 
 
         if button_state == 0:
+            if platform.system() == "Darwin":
+                col = layout.column(align=True)
+                col.label(text="Mac Detected", icon='ERROR')
+                row = col.row(align=True)
+                row.label(text="If Mac freezes or crashes, click this:")
+                #row.label(text="Disable FX to avoid crashes:")
+                row.prop(scn, 'arp_disable_smart_fx', text='')
+                but = col.operator("arp.open_link_internet", text='Learn More', icon='INTERNET' if bpy.app.version >= (4,2,0) else 'WORLD')
+                but.link_string = ard.doc_url+"auto_rig.html#mac-warning"
+                col.separator()
+            
+            if scn.arp_disable_smart_fx:
+                col = layout.column(align=True)
+                col.label(text='FX disabled. GPU icons will')
+                col.label(text='be replaced by static icons (safe)')
+                col.separator()
+            
             layout.operator("id.get_selected_objects", text="Get Selected Objects")
+            
         if button_state == 1:
             col = layout.column(align=True)
             split=col.split(align=True)
             #row.alignment = 'LEFT'
             split.label(text="Turn:")
-            btn = split.operator("id.turn", text='', icon_value=custom_icons['rotate'].icon_id)
+            btn = split.operator("id.turn", text='', icon_value=get_custom_icon('rotate'))
             btn.action = "negative"
-            btn = split.operator("id.turn", text='', icon_value=custom_icons['rotate_inv'].icon_id)
+            btn = split.operator("id.turn", text='', icon_value=get_custom_icon('rotate_inv'))
             btn.action = "positive"
             
             if scn.arp_smart_type == 'BODY':
+                if scn.arp_smart_AI_is_installed:
+                    layout.prop(scn, 'arp_smart_sym', text='Symmetrical Character')
+                    if scn.arp_smart_sym:
+                        col = layout.column(align=True)                        
+                        col.prop(scn, 'arp_smart_AI_body_samples', text='Samples', slider=True)
+                        col = col.column(align=True)
+                        col.operator('arp.guess_markers', text='Guess Markers!', icon_value=get_custom_icon('sparkles'))
+                        col.scale_y = 1.3
+                        
+                #layout.template_icon(icon_value=pcoll['marker_neck_help'].icon_id, scale=3.0)
                 props = layout.operator("id.add_marker", text="Add Neck", icon='PLUS')
                 props.body_part = "neck"
             elif scn.arp_smart_type == 'FACIAL':
+                layout.template_icon(icon_value=pcoll['marker_chin_help'].icon_id, scale=3.0)
                 props = layout.operator("id.add_marker", text="Add Chin", icon='PLUS')
                 props.body_part = "chin"
+                
+        if button_state > 1:
+            marker_selected = False
+            if bpy.context.active_object.name == 'neck_loc':
+                layout.template_icon(icon_value=pcoll['marker_neck_help'].icon_id, scale=3.0)
+                marker_selected = True
+            elif bpy.context.active_object.name.startswith('chin_loc'):
+                layout.template_icon(icon_value=pcoll['marker_chin_help'].icon_id, scale=3.0)
+                marker_selected = True
+            elif bpy.context.active_object.name.startswith('shoulder_loc'):
+                layout.template_icon(icon_value=pcoll['marker_shoulder_help'].icon_id, scale=3.0)
+                marker_selected = True
+            elif bpy.context.active_object.name.startswith('hand_loc'):
+                layout.template_icon(icon_value=pcoll['marker_wrist_help'].icon_id, scale=3.0)
+                marker_selected = True                
+            elif bpy.context.active_object.name.startswith('hand_tip_loc'):
+                layout.template_icon(icon_value=pcoll['marker_handtip_help'].icon_id, scale=3.0)
+                marker_selected = True
+            elif bpy.context.active_object.name.startswith('root_loc'):
+                layout.template_icon(icon_value=pcoll['marker_root_help'].icon_id, scale=3.0)
+                marker_selected = True
+            elif bpy.context.active_object.name.startswith('foot_loc'):
+                layout.template_icon(icon_value=pcoll['marker_ankles_help'].icon_id, scale=3.0)
+                marker_selected = True
+            elif bpy.context.active_object.name.startswith('thigh_loc'):
+                layout.template_icon(icon_value=pcoll['marker_thigh_help'].icon_id, scale=3.0)
+                marker_selected = True
+            elif bpy.context.active_object.name.startswith('knee_loc'):
+                layout.template_icon(icon_value=pcoll['marker_knee_help'].icon_id, scale=3.0)
+                marker_selected = True
+            elif bpy.context.active_object.name.startswith('elbow_loc'):
+                layout.template_icon(icon_value=pcoll['marker_elbow_help'].icon_id, scale=3.0)
+                marker_selected = True
+            elif bpy.context.active_object.name.startswith('head_tip'):
+                layout.template_icon(icon_value=pcoll['marker_head_tip_help'].icon_id, scale=3.0)
+                marker_selected = True
+                
+            if marker_selected:
+                layout.label(text='Selected Marker: '+bpy.context.active_object.name.replace('_loc', '').replace('_sym', '').title())
+            
+        
         if button_state == 2:
+            
             props = layout.operator("id.add_marker", text="Add Chin", icon='PLUS')
             props.body_part = "chin"
         if button_state == 3:
@@ -5571,55 +8045,68 @@ class ARP_PT_proxy_utils_ui(bpy.types.Panel):
             props = layout.operator("id.add_marker", text="Add Wrists", icon='PLUS')
             props.body_part = "hand"
         if button_state == 5:
+            props = layout.operator("id.add_marker", text="Add Hand Tip", icon='PLUS')
+            props.body_part = "hand_tip"
+        if button_state == 6:            
             props = layout.operator("id.add_marker", text="Add Spine Root", icon='PLUS')
             props.body_part = "root"
-        if button_state == 6:
+        if button_state == 7:            
             props = layout.operator("id.add_marker", text="Add Ankles", icon='PLUS')
             props.body_part = "foot"
 
 
-
-        if button_state > 6 and button_state < 8:
+        if button_state >= 8 and button_state < 9:
             col = layout.column(align=True)
             
-            if scn.arp_smart_type == 'BODY':                             
+            if scn.arp_smart_type == 'BODY':    
+                # optional markers
+                col.menu("ARP_MT_optional_markers_menu", icon='PLUS', text="Add Optional Markers")            
+                col.separator()
                 col.label(text='Skeleton Settings Presets:')
                 col.prop(scn, 'arp_smart_preset_settings', text='')
                 
                 def show_fingers_ui(panel):
                     if panel:
-                        #col.separator()
                         col = panel.column(align=True)
                     else:
                         col = layout.column(align=True)
-                    col.prop(scn, "arp_fingers_enable", text="Fingers")                
-                    col = layout.column(align=True)                
-                    col.enabled = scn.arp_fingers_enable
-                    col.prop(scn, "arp_fingers_to_detect", text="")
+                        col.prop(scn, "arp_fingers_enable", text="Fingers")
                     
-                    col = layout.column(align=True)
-                    col.enabled = scn.arp_fingers_to_detect != 0
-                    col.prop(scn, "arp_smart_remesh_type", text="")
-                    col.prop(scn, "arp_smart_remesh", slider=True)
-                    col.prop(scn, "arp_finger_thickness", slider=True)
+                    col.enabled = scn.arp_fingers_enable
+                    col_icon = col.column()                         
+                    col_icon.template_icon(icon_value=pcoll['fingers'+str(scn.arp_fingers_to_detect)].icon_id, scale=2.0)
+                    col.prop(scn, 'arp_fingers_to_detect', text='')                    
+                    
+                    if scn.arp_smart_AI_is_installed and scn.arp_fingers_to_detect >= 4 and scn.arp_smart_depth:# hand tip marker depth is required for AI fingers
+                        row = col.row(align=True)
+                        row.prop(scn, 'arp_smart_fingers_engine', expand=True)
+                        if scn.arp_smart_fingers_engine == 'AI': 
+                            col.prop(scn, 'arp_smart_AI_samples', text='Samples', slider=True)
+                            col.prop(scn, 'arp_smart_AI_thresh', text='Error Threshold', slider=True)
+                            col = col.column(align=True)
+                            col.operator('arp.guess_fingers', text='Guess Fingers!', icon_value=get_custom_icon('sparkles'))        
+                            col.scale_y = 1.3
+                            
+                    if scn.arp_smart_fingers_engine == 'LEGACY' or not scn.arp_smart_AI_is_installed or scn.arp_fingers_to_detect < 4 or not scn.arp_smart_depth:
+                        col.prop(scn, "arp_smart_remesh_type", text="")
+                        col.prop(scn, "arp_smart_remesh", slider=True)
+                        col.prop(scn, "arp_finger_thickness", slider=True)
+                        
+                    col.separator()
                     
                 # easy UI collapsable panels in Blender 4.1+
                 if bpy.app.version >= (4,1,0):
                     header_fingers, panel_fingers = layout.panel("arp_smart_ui_fingers", default_closed=False)
-                    header_fingers.label(text="Fingers")
-                    if panel_fingers:
+                    header_fingers.prop(scn, 'arp_fingers_enable', text='Fingers')
+                    if panel_fingers:# None if collapsed
                         show_fingers_ui(panel_fingers)
-                        col.separator()
                 else:
                     show_fingers_ui(None)
-                    col = layout.column()
-                    #col.separator()
                     
-                
                 
                 def show_spine_ui(panel):
                     if panel:
-                        col = panel.column(align=True)
+                        col = panel.column()
                     else:
                         col = layout.column(align=True)
                     col.prop(scn, "arp_smart_spine_count", text="Spine Count")
@@ -5631,7 +8118,7 @@ class ARP_PT_proxy_utils_ui(bpy.types.Panel):
                 if bpy.app.version >= (4,1,0):
                     header_spine, panel_spine = layout.panel("arp_smart_ui_spine", default_closed=False)
                     header_spine.label(text="Spine")
-                    if panel_spine:
+                    if panel_spine:# None if collapsed
                         show_spine_ui(panel_spine)           
                 else:
                     show_spine_ui(None)
@@ -5660,7 +8147,7 @@ class ARP_PT_proxy_utils_ui(bpy.types.Panel):
                     
             col = layout.column()
             col.separator()
-            col.operator('id.facial_setup', text='Add Facial' if not arp_facial_is_there else 'Edit Facial...', icon_value=custom_icons['mask'].icon_id)
+            col.operator('id.facial_setup', text='Add Facial' if not arp_facial_is_there else 'Edit Facial...', icon_value=get_custom_icon('mask'))
 
             col.separator()
             
@@ -5668,55 +8155,84 @@ class ARP_PT_proxy_utils_ui(bpy.types.Panel):
             col.prop(scn, 'arp_smart_overwrite')
             col = layout.column()
             col.scale_y = 1.3
-            col.operator("id.go_detect", text='Go!', icon_value=custom_icons['sparkles'].icon_id)#icon='SHADERFX')
+            col.operator("id.go_detect", text='Go!', icon_value=get_custom_icon('sparkles'))
             col.separator()
 
-        if button_state == 8:
+        if button_state == 9:
+            if scn.arp_smart_AI_is_installed:
+                col = layout.column(align=True)
+                col = col.column(align=True)
+                col.prop(scn, 'arp_smart_AI_facial_samples', text='Samples', slider=True)
+                col1 = col.column(align=True)
+                col1.operator('arp.guess_facial', text='Guess Facial!', icon_value=get_custom_icon('sparkles'))
+                col1.scale_y = 1.3            
+            
             col = layout.column()
-            col.label(text="Eyeball Object:")
-            row = col.row(align=True)
-            row.prop(scn, "arp_eyeball_type", expand=True)
-            if scn.arp_eyeball_type == "SEPARATE":
-                col.label(text="Left Eyeball:")
-            row = col.row(align=True)
-            row.prop_search(scn, "arp_eyeball_name", bpy.data, "objects", text="")
-            op = row.operator("id.smart_pick_object", text="", icon='EYEDROPPER')
-            op.op_prop = "eyeball"
-            if scn.arp_eyeball_type == "SEPARATE":
-                col.label(text="Right Eyeball:")
+            col.prop(scn, "arp_smart_sym")
+            
+            col = layout.column()
+            col.prop(scn, 'arp_smart_ears', text='Ears')
+            col.prop(scn, 'arp_smart_eyebrows', text='Eyebrows')
+            
+            col.prop(scn, 'arp_smart_eyes', text='Eyes')
+            if scn.arp_smart_eyes:
+                col = layout.column(align=True)
+                col.label(text='Eyeball Object:')
                 row = col.row(align=True)
-                row.prop_search(scn, "arp_eyeball_name_right", bpy.data, "objects", text="")
-                op = row.operator("id.smart_pick_object", text="", icon='EYEDROPPER')
-                op.op_prop = "eyeball_right"
-                
-            col.separator()
-            
-            col.label(text="Tongue Object (optional):")
-            row = col.row(align=True)
-            row.prop_search(scn, 'arp_tongue_name', bpy.data, "objects", text="")
-            op = row.operator("id.smart_pick_object", text="", icon='EYEDROPPER')
-            op.op_prop = "tongue"
-            
-            col.separator()
-            
-            col.label(text="Teeth Object (optional):")
-            row = col.row(align=True)
-            row.prop(scn, 'arp_teeth_type', expand=True)
-            if scn.arp_teeth_type == "SEPARATE":
-                col.label(text="Upper Teeth:")
-                
-            row = col.row(align=True)
-            row.prop_search(scn, 'arp_teeth_name', bpy.data, "objects", text="")
-            op = row.operator("id.smart_pick_object", text="", icon='EYEDROPPER')
-            op.op_prop = 'teeth'
-            
-            if scn.arp_teeth_type == "SEPARATE":
-                col.label(text="Lower Teeth:")
+                row.prop(scn, 'arp_eyeball_type', expand=True)
                 row = col.row(align=True)
-                row.prop_search(scn, "arp_teeth_lower_name", bpy.data, "objects", text="")
-                op = row.operator("id.smart_pick_object", text="", icon='EYEDROPPER')
-                op.op_prop = "teeth_lower"
+                row.prop(scn, 'arp_smart_eye_shape', expand=True)
+                if scn.arp_eyeball_type == 'SEPARATE':
+                    col.label(text='Left Eyeball:')
+                row = col.row(align=True)
+                row.prop_search(scn, 'arp_eyeball_name', bpy.data, 'objects', text='')
+                op = row.operator('id.smart_pick_object', text='', icon='EYEDROPPER')
+                op.op_prop = 'eyeball'
+                if scn.arp_eyeball_type == 'SEPARATE':
+                    col.label(text='Right Eyeball:')
+                    row = col.row(align=True)
+                    row.prop_search(scn, 'arp_eyeball_name_right', bpy.data, 'objects', text='')
+                    op = row.operator('id.smart_pick_object', text='', icon='EYEDROPPER')
+                    op.op_prop = 'eyeball_right'
+                    
+                col.separator()
+                
+            col.prop(scn, 'arp_smart_nose', text='Nose')
+            col.prop(scn, 'arp_smart_cheeks', text='Cheeks')
             
+            col.prop(scn, 'arp_smart_mouth', text='Mouth')
+            if scn.arp_smart_mouth:
+                col.prop(scn, 'arp_smart_tongue', text='Tongue')
+                if scn.arp_smart_tongue:
+                    col.label(text="Tongue Object (optional):")
+                    row = col.row(align=True)
+                    row.prop_search(scn, 'arp_tongue_name', bpy.data, "objects", text="")
+                    op = row.operator("id.smart_pick_object", text="", icon='EYEDROPPER')
+                    op.op_prop = "tongue"
+                    col.separator()
+                
+                col.prop(scn, 'arp_smart_teeth', text='Teeth')
+                if scn.arp_smart_teeth:
+                    col.label(text="Teeth Object (optional):")
+                    row = col.row(align=True)
+                    row.prop(scn, 'arp_teeth_type', expand=True)
+                    if scn.arp_teeth_type == "SEPARATE":
+                        col.label(text="Upper Teeth:")
+                        
+                    row = col.row(align=True)
+                    row.prop_search(scn, 'arp_teeth_name', bpy.data, "objects", text="")
+                    op = row.operator("id.smart_pick_object", text="", icon='EYEDROPPER')
+                    op.op_prop = 'teeth'
+                    
+                    if scn.arp_teeth_type == "SEPARATE":
+                        col.label(text="Lower Teeth:")
+                        row = col.row(align=True)
+                        row.prop_search(scn, "arp_teeth_lower_name", bpy.data, "objects", text="")
+                        op = row.operator("id.smart_pick_object", text="", icon='EYEDROPPER')
+                        op.op_prop = "teeth_lower"
+            
+            
+            col.prop(scn, 'arp_smart_chin', text='Chin')
             col.separator()
             
             row = col.row(align=True)
@@ -5724,10 +8240,11 @@ class ARP_PT_proxy_utils_ui(bpy.types.Panel):
             row.operator('id.validate_facial_setup', text='OK')
                 
                 
-        if button_state > 0 and button_state < 8:
-            layout.prop(scn, "arp_smart_sym")
+        if button_state > 0 and button_state < 9:
+            if button_state > 1:
+                layout.prop(scn, "arp_smart_sym")
+            layout.prop(scn, 'arp_smart_depth')
             col = layout.column(align=True)
-            #if button_state <= 7:
             col.operator("id.restore_markers", text="Restore Last Session", icon='RECOVER_LAST')
             col.operator("id.cancel_and_delete_markers", text="Cancel and Delete Markers", icon='PANEL_CLOSE')
 
@@ -5737,7 +8254,7 @@ class ARP_PT_proxy_utils_ui(bpy.types.Panel):
 
 @persistent
 def cleanup(dummy):
-    try:
+    try:   
         bpy.types.SpaceView3D.draw_handler_remove(handles[0], 'WINDOW')
         if bpy.context.scene.arp_debug_mode:
             print('Removed handler')
@@ -5753,6 +8270,7 @@ def enable_markers_fx(dummy):
         if len(get_object('arp_markers').children) > 0:
             print('Markers already in scene, enable Markers FX')
             bpy.ops.id.markers_fx(active=True)
+            
             
 def update_smart_presets(self, context):
     scn = context.scene
@@ -5781,6 +8299,70 @@ def update_smart_presets(self, context):
         scn.arp_smart_shoulders_align = 'TILTED'
         scn.arp_smart_spine_shape = 'ARCHED'
 
+
+def update_facial_list(verts_list, prop):    
+    obj = get_object('arp_facial_setup')
+    if obj:
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.select_all(action='DESELECT')
+        except:
+            pass
+        set_active_object('arp_facial_setup')   
+        bpy.ops.object.mode_set(mode='OBJECT')
+        
+        for vert in obj.data.vertices:
+            if vert.index in verts_list:
+                vert.hide = False if prop else True
+                
+        for edge in obj.data.edges:
+            for vi in edge.vertices:
+                if vi in verts_list:
+                    edge.hide = False if prop else True
+                
+        bpy.ops.object.mode_set(mode='EDIT')
+        
+        
+def update_smart_ears(self, context):
+    scn = bpy.context.scene
+    ear_verts = [ard.facial_markers[i] for i in ard.facial_markers if i.startswith('ear_')]
+    update_facial_list(ear_verts, scn.arp_smart_ears)
+    
+         
+def update_smart_eyebrows(self, context):
+    scn = bpy.context.scene
+    eyebrow_verts = [ard.facial_markers[i] for i in ard.facial_markers if i.startswith('eyebrow_')]
+    update_facial_list(eyebrow_verts, scn.arp_smart_eyebrows)
+   
+        
+def update_smart_nose(self, context):
+    scn = bpy.context.scene
+    nose_verts = [ard.facial_markers[i] for i in ard.facial_markers if i.startswith('nose_')]
+    update_facial_list(nose_verts, scn.arp_smart_nose)
+        
+
+def update_smart_cheeks(self, context):
+    scn = bpy.context.scene
+    cheek_verts = [ard.facial_markers[i] for i in ard.facial_markers if i.startswith('cheek_')]
+    update_facial_list(cheek_verts, scn.arp_smart_cheeks)
+    
+    
+def update_smart_eyes(self, context):
+    scn = bpy.context.scene
+    eyelid_verts = [ard.facial_markers[i] for i in ard.facial_markers if i.startswith('eyelid_')]
+    update_facial_list(eyelid_verts, scn.arp_smart_eyes)
+    
+def update_smart_mouth(self, context):
+    scn = bpy.context.scene
+    mouth_verts = [ard.facial_markers[i] for i in ard.facial_markers if i.startswith('lips_')]
+    update_facial_list(mouth_verts, scn.arp_smart_mouth)
+    
+def update_smart_chin(self, context):
+    scn = bpy.context.scene
+    chin_verts = [ard.facial_markers[i] for i in ard.facial_markers if i.startswith('chin_')]
+    update_facial_list(chin_verts, scn.arp_smart_chin)
+        
+        
 bpy.app.handlers.load_pre.append(cleanup)
 bpy.app.handlers.load_post.append(enable_markers_fx)
 
@@ -5788,7 +8370,8 @@ bpy.app.handlers.load_post.append(enable_markers_fx)
 ###########  REGISTER  ##################
 classes = (ARP_OT_facial_setup, ARP_OT_cancel_facial_setup, ARP_OT_validate_facial_setup, ARP_OT_restore_markers, ARP_OT_turn, 
             ARP_OT_get_selected_objects, 
-            ARP_OT_go_detect, ARP_OT_markers_fx, ARP_OT_add_marker, ARP_OT_delete_detected, ARP_OT_cancel_and_delete_markers, 
+            ARP_OT_go_detect, ARP_OT_markers_fx, ARP_OT_add_marker, ARP_OT_delete_detected, ARP_MT_optional_markers_menu, ARP_OT_cancel_and_delete_markers, 
+            ARP_OT_guess_markers, ARP_OT_guess_fingers, ARP_OT_guess_facial,
             ARP_PT_proxy_utils_ui, bone_transform, markers_transform, facial_markers_transform)#ARP_OT_smart_find_armatures)
 
 
@@ -5797,7 +8380,7 @@ def update_arp_tab():
         bpy.utils.unregister_class(ARP_PT_proxy_utils_ui)
     except:
         pass
-    ARP_PT_proxy_utils_ui.bl_category = bpy.context.preferences.addons[__package__.split('.')[0]].preferences.arp_tab_name
+    ARP_PT_proxy_utils_ui.bl_category = get_prefs().arp_tab_name
     bpy.utils.register_class(ARP_PT_proxy_utils_ui)
 
     
@@ -5805,49 +8388,80 @@ def update_arp_tab():
 def register():
     from bpy.utils import register_class
     for cls in classes:
-        register_class(cls)
+        try: register_class(cls)
+        except: pass
 
     update_arp_tab()
     
     global custom_icons
     custom_icons = auto_rig.custom_icons
+    
+    global pcoll
+    pcoll = bpy.utils.previews.new()
+    file_dir = os.path.dirname(__file__)    
+    icons_dir = os.path.join(os.path.dirname(file_dir), 'icons')
+    for file_name in os.listdir(icons_dir):
+        if file_name.endswith('.png') and (file_name.startswith('fingers') or file_name.startswith('marker_')):
+            pcoll.load(file_name.replace('.png', ''), os.path.join(icons_dir, file_name), 'IMAGE')
+    bpy.types.Scene.arp_large_icon = bpy.props.IntProperty(default=0)
 
-    bpy.types.Scene.arp_body_name = StringProperty(name="Body name", description = "Get the body object name")
-    bpy.types.Scene.arp_fingers_to_detect = IntProperty(description = "How many fingers should be found on this model", name = "Fingers Detection", default=5, min=0, max=5)
-    bpy.types.Scene.arp_fingers_enable = BoolProperty(description="Enable fingers", name = "Enable Fingers", default=True)
+    bpy.types.Scene.arp_body_name = StringProperty(name="Body name", description = "Get the body object name", options={'HIDDEN'})
+    bpy.types.Scene.arp_fingers_to_detect = IntProperty(description = "How many fingers should be found on this model", name="Fingers Detection", default=5, min=0, max=5, update=update_fingers_to_detect, options={'HIDDEN'})
+    bpy.types.Scene.arp_fingers_enable = BoolProperty(description="Enable fingers", name = "Enable Fingers", update=update_fingers_enable, default=True, options={'HIDDEN'})
     bpy.types.Scene.arp_fingers_init_transform = CollectionProperty(type=bone_transform)
     bpy.types.Scene.arp_quit = BoolProperty(name="Quit", default=False)
     bpy.types.Scene.arp_markers_save = CollectionProperty(type=markers_transform)
     bpy.types.Scene.arp_facial_markers_save = CollectionProperty(type=facial_markers_transform)
-    bpy.types.Scene.arp_smart_sym = BoolProperty(name="Mirror", default=True, update=update_sym, description="Mirror the left (character's left side) markers and bones position to the right side")
+    bpy.types.Scene.arp_smart_depth = BoolProperty(name='Use Markers Depth', default=False, description='Use the markers depth (Y loc)')
+    bpy.types.Scene.arp_smart_sym = BoolProperty(name="Mirror", default=True, update=update_sym, description="Mirror the left (character's left side) markers and bones position to the right side", options={'HIDDEN'})
     bpy.types.Scene.arp_foot_dir_l = FloatVectorProperty(name="Left Foot Direction", subtype='DIRECTION', default=(0,0,0))
     bpy.types.Scene.arp_foot_dir_r = FloatVectorProperty(name="Right Foot Direction", subtype='DIRECTION', default=(0,0,0))
-    bpy.types.Scene.arp_smart_remesh  = IntProperty(name="Voxel Precision", description = "Voxel resolution for the fingers detection. Should generally not be modified, unless it gives wrong fingers detection.", default=9, soft_min=7, soft_max=10)
-    bpy.types.Scene.arp_smart_remesh_type  = EnumProperty(items=(('type1', 'Voxel Type 1', 'Type 1'), ('type2', 'Voxel Type 2', 'Type 2')), description="Method to voxelize the model, changing it may improve the results")
-    bpy.types.Scene.arp_finger_thickness = FloatProperty(name="Finger Thickness", description = "Increase this value if the detected fingers roots position are wrong, if they go too much inward the palm", default=3.0, min=0.5, max=9.0)
+    bpy.types.Scene.arp_smart_remesh  = IntProperty(name="Voxel Precision", description = "Voxel resolution for the fingers detection. Should generally not be modified, unless it gives wrong fingers detection.", default=9, soft_min=7, soft_max=10, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_remesh_type  = EnumProperty(items=(('type1', 'Voxel Type 1', 'Type 1'), ('type2', 'Voxel Type 2', 'Type 2')), description="Method to voxelize the model, changing it may improve the results", options={'HIDDEN'})
+    bpy.types.Scene.arp_finger_thickness = FloatProperty(name="Finger Thickness", description = "Increase this value if the detected fingers roots position are wrong, if they go too much inward the palm", default=3.0, min=0.5, max=9.0, options={'HIDDEN'})
     bpy.types.Scene.arp_marker_to_select = StringProperty(name="Marker to select")
-    bpy.types.Scene.arp_smart_spine_count = IntProperty(name="Spine Count", description="Number of spine bones", default=4, min=1, max=32)
-    bpy.types.Scene.arp_smart_neck_count = IntProperty(name="Neck Count", description="Number of neck bones", default=1, min=1, max=16)
-    bpy.types.Scene.arp_smart_twist_count = IntProperty(name="Twist Count", description="Number of twist bones for the arms and legs", default=1, min=1, max=32)
-    bpy.types.Scene.arp_smart_root_vertical = BoolProperty(name="Root Up", description="Set the spine root bone vertically aligned", default=True)
+    bpy.types.Scene.arp_smart_spine_count = IntProperty(name="Spine Count", description="Number of spine bones", default=4, min=1, max=32, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_neck_count = IntProperty(name="Neck Count", description="Number of neck bones", default=1, min=1, max=16, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_twist_count = IntProperty(name="Twist Count", description="Number of twist bones for the arms and legs", default=1, min=1, max=32, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_root_vertical = BoolProperty(name="Root Up", description="Set the spine root bone vertically aligned", default=True, options={'HIDDEN'})
     bpy.types.Scene.arp_smart_spine_shape = EnumProperty(name="Spine Shape", items=(
         ('STRAIGHT', 'Straight', 'Straight spine bones'), 
         ('MODEL_FIT', 'Model Fit', 'Spine bones will fit the model shape'), 
         ('ARCHED', 'Arched (UE)', 'Curved spine, inward. Fit the UE5 Mannequin')), 
-        description='Shape of the spine', default='STRAIGHT')
+        description='Shape of the spine', default='STRAIGHT', options={'HIDDEN'})
     bpy.types.Scene.arp_smart_shoulders_align = EnumProperty(items=(
         ('MODEL_FIT', 'Model Fit', 'Align the clavicles with default position, fitting the pose of the model'),
         ('STRAIGHT', 'Straight', 'Align the Y clavicles location with the arm position'),
         ('TILTED', 'Tilted (UE)', 'Tilt slightly the clavicles down')),
-        name="Align Clavicles", description='How to align shoulders/clavicles', default='STRAIGHT')
-    bpy.types.Scene.arp_smart_overwrite = BoolProperty(name="Overwrite Existing Rig", description="If enabled, overwrite bones data of the existing rig (if any).\nIf disabled, a new rig will always be generated", default=True)
-    bpy.types.Scene.arp_smart_type = EnumProperty(items=(('BODY', 'Full Body', 'Body, with optional facial'), ('FACIAL', 'Facial Only', 'Facial only')))
-    bpy.types.Scene.arp_smart_preset_settings = EnumProperty(items=(('DEFAULT', 'ARP Default', 'Default settings'), ('UE4', 'UE4 Mannequin', 'UE4 humanoid skeleton'), ('UE5', 'UE5 Manny-Quinn', 'UE5 humanoid skeleton')), 
-                                                description='Preset settings', update=update_smart_presets)
-    bpy.types.Scene.arp_smart_markers_enable = BoolProperty(default=False)
-    
+        name="Align Clavicles", description='How to align shoulders/clavicles', default='STRAIGHT', options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_overwrite = BoolProperty(name="Overwrite Existing Rig", description="If enabled, overwrite bones data of the existing rig (if any).\nIf disabled, a new rig will always be generated", default=True, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_type = EnumProperty(items=(('BODY', 'Full Body', 'Body, with optional facial'), ('FACIAL', 'Facial Only', 'Facial only')), options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_preset_settings = EnumProperty(items=(('DEFAULT', 'ARP Default', 'Default settings'), ('UE4', 'UE4 Mannequin', 'UE4 humanoid skeleton'), ('UE5', 'UE5 Manny-Quinn', 'UE5 humanoid skeleton')), description='Preset settings', update=update_smart_presets, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_eye_shape = EnumProperty(items=( ('SPHERE', 'Sphere', 'The eyeball object is a complete sphere'), ('HEMISPHERE', 'Hemisphere', 'The eyeball object is one half of a sphere') ), description='Eyeball object shape')
+    bpy.types.Scene.arp_smart_ears = BoolProperty(default=True, description='Enable ears', update=update_smart_ears, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_eyebrows = BoolProperty(default=True, description='Enable eyebrows', update=update_smart_eyebrows, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_nose = BoolProperty(default=True, description='Enable nose', update=update_smart_nose, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_cheeks = BoolProperty(default=True, description='Enable cheeks', update=update_smart_cheeks, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_eyes = BoolProperty(default=True, description='Enable eyes', update=update_smart_eyes, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_mouth = BoolProperty(default=True, description='Enable mouth', update=update_smart_mouth, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_tongue = BoolProperty(default=True, description='Enable tongue', options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_teeth = BoolProperty(default=True, description='Enable teeth', options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_chin = BoolProperty(default=True, description='Enable chin', update=update_smart_chin, options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_AI_is_installed = BoolProperty(default=False, description='AI folder exists', options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_fingers_engine = EnumProperty(items=(
+        ('AI', 'AI', 'All-rounder AI detection'),
+        ('LEGACY', 'Voxel Centroid', 'Works best with slick fingers topology. Prone to errors with complex, layered topology')
+        ), 
+        description='Engine to detect fingers', update=update_fingers_engine, default='LEGACY', options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_AI_samples = IntProperty(min=2, soft_max=16, default=10, description="More samples = better estimation, may take more time to compute", options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_AI_body_samples = IntProperty(min=1, default=10, max=30, description="More samples = better estimation, may take more time to compute", options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_AI_facial_samples = IntProperty(min=1, default=8, max=16, description="More samples = better estimation, may take more time to compute", options={'HIDDEN'})
+    bpy.types.Scene.arp_smart_AI_thresh = FloatProperty(soft_min=0.1, soft_max=0.7, default=0.5, description="Decreasing this value may help with complex fingers, but more prone to error", options={'HIDDEN'})
+   
 
 def unregister():
+    global pcoll
+    bpy.utils.previews.remove(pcoll)
     from bpy.utils import unregister_class
     for cls in reversed(classes):
         unregister_class(cls)
@@ -5859,6 +8473,7 @@ def unregister():
     del bpy.types.Scene.arp_markers_save
     del bpy.types.Scene.arp_facial_markers_save
     del bpy.types.Scene.arp_smart_sym
+    del bpy.types.Scene.arp_smart_depth
     del bpy.types.Scene.arp_foot_dir_l
     del bpy.types.Scene.arp_foot_dir_r
     del bpy.types.Scene.arp_smart_remesh
@@ -5874,6 +8489,19 @@ def unregister():
     del bpy.types.Scene.arp_smart_overwrite
     del bpy.types.Scene.arp_smart_type
     del bpy.types.Scene.arp_smart_preset_settings
-    del bpy.types.Scene.arp_smart_markers_enable
-
-
+    del bpy.types.Scene.arp_smart_eye_shape
+    del bpy.types.Scene.arp_smart_ears
+    del bpy.types.Scene.arp_smart_eyebrows
+    del bpy.types.Scene.arp_smart_nose
+    del bpy.types.Scene.arp_smart_cheeks
+    del bpy.types.Scene.arp_smart_eyes
+    del bpy.types.Scene.arp_smart_mouth    
+    del bpy.types.Scene.arp_smart_tongue
+    del bpy.types.Scene.arp_smart_teeth
+    del bpy.types.Scene.arp_smart_chin
+    del bpy.types.Scene.arp_smart_AI_is_installed
+    del bpy.types.Scene.arp_smart_fingers_engine
+    del bpy.types.Scene.arp_smart_AI_samples
+    del bpy.types.Scene.arp_smart_AI_body_samples
+    del bpy.types.Scene.arp_smart_AI_facial_samples
+    del bpy.types.Scene.arp_smart_AI_thresh

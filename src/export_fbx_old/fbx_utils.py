@@ -1565,7 +1565,7 @@ FBXExportSettings = namedtuple("FBXExportSettings", (
     "bake_anim", "bake_anim_use_all_bones", "bake_anim_use_nla_strips", "bake_anim_use_all_actions",
     "bake_anim_step", "bake_anim_simplify_factor", "bake_anim_force_startend_keying",
     "use_metadata", "media_settings", "use_custom_props", "colors_type", "prioritize_active_color",
-    "shape_keys_baked_data_dict", "export_action_only"# Auto-Rig Pro implant
+    "shape_keys_baked_data_dict", "export_action_only", "bake_anim_force_startend_keying_sk"# Auto-Rig Pro implant
 ))
 
 # Helper container gathering some data we need multiple times:

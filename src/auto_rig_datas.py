@@ -2,10 +2,13 @@ import bpy
 import mathutils
 from mathutils import *
 
+doc_url = "https://lucky3d.fr/auto-rig-pro/doc/"
+
 # Layers to collection data conversion
-layer_col_map_special = {'ge_childof':16, 'ge_orient':17, 'ge_basebone':18, 'remap01':24, 'mch_feathers':24, 'mch_kilt_masters':24, 'remap02':25}
+layer_col_map_special = {'ge_childof':16, 'ge_orient':17, 'ge_basebone':18, 'remap01':24, 'mch_feathers':24, 'mch_kilt_masters':24, 'remap02':25, 'mch_3bik_2':25}
 layer_col_map = {'Main':0, 'Secondary':1, 'mch_01':8, 'mch_stretch':9, 'mch_base':10, 'mch_twist':11, 'mch_ik':12, 
-                'mch_ik_nostr':13, 'mch_fk':14, 'Reference':17, 'mch_disabled':22, 'mch_cs_transf':23, 'Deform':31}
+                'mch_ik_nostr':13, 'mch_fk':14, 'Reference':17, 'mch_disabled':22, 'mch_cs_transf':23,
+                'mch_3bik_2_nostr':29, 'mch_3bik_2_rev':28, 'mch_cor_sk':30, 'Deform':31}
                 
 bones_groups = ['secondary', 'hair', 'body.r', 'body.l', 'hidden', 'hand.l', 'hand.r', 'body.r_sel', 'body.l_sel', 'body.x_sel', 'body.x']
 bones_groups_to_remove = ['secondary', 'hair', 'hidden', 'hand.l', 'hand.r', 'body.l_sel', 'body.x_sel', 'body.r_sel', 'ik_target.l', 'ik_target.r', 'ik_target2.l', 'ik_target2.r', 'ik_pole.l', 'ik_pole.r', 'red']
@@ -13,6 +16,8 @@ bones_groups_to_remove = ['secondary', 'hair', 'hidden', 'hand.l', 'hand.r', 'bo
 
 # ARMS
 #   Fingers
+fingers_names = ['pinky', 'ring', 'index', 'middle', 'thumb']
+
 #     thumb
 thumb_ref_dict = {'thumb1':'thumb1_ref', 'thumb2':'thumb2_ref', 'thumb3':'thumb3_ref'}
 thumb_ref_list = [j for i, j in thumb_ref_dict.items()]
@@ -20,7 +25,7 @@ thumb_ref_list = [j for i, j in thumb_ref_dict.items()]
 thumb_control_dict = {'base':'c_thumb1_base', '1':'c_thumb1', '2':'c_thumb2', '3':'c_thumb3'}
 thumb_control_list = [j for i, j in thumb_control_dict.items()]
 
-thumb_intern_dict = {'base':'thumb1', 'bend_all':'thumb_bend_all', 'rot1':'c_thumb1_rot', 'rot2':'c_thumb2_rot', 'rot3':'c_thumb3_rot'}
+thumb_intern_dict = {'base':'thumb1', 'bend_all':'thumb_bend_all', 'rot1':'thumb1_rot', 'rot2':'thumb2_rot', 'rot3':'thumb3_rot'}
 thumb_intern_list = [j for i, j in thumb_intern_dict.items()]
 
 #    index
@@ -58,6 +63,7 @@ pinky_ref_dict = {'pinky_meta':'pinky1_base_ref', 'pinky1':'pinky1_ref', 'pinky2
 pinky_ref_list = [j for i, j in pinky_ref_dict.items()]
 
 pinky_control_dict = {i: j.replace('thumb', 'pinky') for i, j in thumb_control_dict.items()}
+pinky_control_dict['pinky_auto'] = 'c_pinky1_auto'
 pinky_control_list = [j for i, j in pinky_control_dict.items()]
 
 pinky_intern_dict = {i: j.replace('thumb','pinky') for i, j in thumb_intern_dict.items()}
@@ -69,13 +75,14 @@ fingers_intern = thumb_intern_list + index_intern_list + middle_intern_list + ri
 
 #     ik
 fingers_control_ik = []
-for finger_type in ["thumb", "index", "middle", "ring", "pinky"]:
+for finger_type in ['thumb', 'index', 'middle', 'ring', 'pinky']:
     for fi in range(1, 4):
-        fingers_control_ik.append("c_"+finger_type+str(fi)+"_ik")
+        fingers_control_ik.append('c_'+finger_type+str(fi)+'_ik')
+        fingers_control_ik.append('c_'+finger_type+str(fi)+'_ik3')
     
-    fingers_control_ik.append("c_"+finger_type+"_ik")# target
-    fingers_control_ik.append("c_"+finger_type+"_ik2")
-    fingers_control_ik.append("c_"+finger_type+"_pole")# pole
+    fingers_control_ik.append('c_'+finger_type+'_ik')# target
+    fingers_control_ik.append('c_'+finger_type+'_ik2')
+    fingers_control_ik.append('c_'+finger_type+'_pole')# pole
     
 
 #   Arms
@@ -83,12 +90,13 @@ arm_bones_dict = {
     'shoulder':{'control':'c_shoulder', 'deform':'shoulder', 'track_pole':'shoulder_track_pole', 'pole':'shoulder_pole'},
     'arm':{'base':'arm', 'twist':'arm_twist', 'twist_twk':'arm_twist_twk', 'control_twist':'c_arm_twist_offset', 'stretch':'arm_stretch', 'control_fk':'c_arm_fk', 'fk':'arm_fk', 'ik':'arm_ik', 'control_ik':'c_arm_ik', 'ik_scale_fix':'arm_ik_nostr_scale_fix', 'ik_nostr':'arm_ik_nostr', 'secondary_00':'c_shoulder_bend','secondary_01':'c_arm_bend'},
     'forearm':{'base':'forearm', 'control_fk':'c_forearm_fk', 'fk':'forearm_fk', 'ik':'forearm_ik', 'ik_nostr':'forearm_ik_nostr', 'stretch':'forearm_stretch', 'twist':'forearm_twist', 'secondary_00':'c_elbow_bend', 'secondary_01':'c_forearm_bend', 'secondary_02':'c_wrist_bend'},
-    'hand':{'deform':'hand', 'control_fk':'c_hand_fk', 'control_ik':'c_hand_ik', 'control_ik_offset':'c_hand_ik_offset', 'fk_scale_fix':'c_hand_fk_scale_fix', 'rot_twist':'hand_rot_twist', 'secondary_00':'hand_bend'},
+    'hand':{'deform':'hand', 'control_fk':'c_hand_fk', 'control_ik':'c_hand_ik', 'control_ik_offset':'c_hand_ik_offset', 'ik_pivot':'hand_ik_pivot', 'control_ik_pivot':'c_hand_ik_pivot', 'fk_scale_fix':'hand_fk_scale_fix', 'rot_twist':'hand_rot_twist', 'secondary_00':'hand_bend'},
     'prepole':'arm_fk_pre_pole',
     'fk_pole':'arm_fk_pole',
     'control_pin':'c_stretch_arm_pin',
     'control_stretch':'c_stretch_arm',
-    'control_pole_ik': 'c_arms_pole'}
+    'control_pole_ik': 'c_arms_pole',
+    'pole_line': 'arm_pole_line'}
     
 arm_bones = []
 for i, j in arm_bones_dict.items():
@@ -174,15 +182,20 @@ toes_control = toes_thumb_control_list + toes_index_control_list + toes_middle_c
 
 
 leg_bones_dict = {
+    'leg_pole_root': 'leg_pole_root',
+    'leg_pole_tracker': 'leg_pole_tracker',
+    'leg_pole_prsv_scale': 'leg_pole_psrv',
     'thigh_b_ik':{'1':'thigh_b_ik01', '2':'thigh_b_ik02', '3':'thigh_b_ik03'},
-    'upthigh':'c_thigh_b',
+    'upthigh2': 'thigh_b_str',
+    'upthigh':'c_thigh_b',    
     'upthigh_helper': {'1': 'thigh_b_h', '2': 'thigh_b_loc'},
     'thigh': {'base':'thigh', 'fk':'thigh_fk', 'ik':'thigh_ik', 'ik_nostr':'thigh_ik_nostr', 'control_fk':'c_thigh_fk', 'control_ik':'c_thigh_ik', 'twist':'thigh_twist', 'stretch':'thigh_stretch', 'secondary_00':'c_thigh_bend_contact', 'secondary_01':'c_thigh_bend_01', 'secondary_02':'c_thigh_bend_02'}, 
-    'calf':{'base':'leg', 'fk':'leg_fk', 'ik':'leg_ik', 'ik_nostr':'leg_ik_nostr', 'control_fk':'c_leg_fk', 'twist':'leg_twist', 'stretch':'leg_stretch', 'secondary_00':'c_knee_bend', 'secondary_01':'c_leg_bend_01', 'secondary_02':'c_leg_bend_02', 'secondary_03':'c_ankle_bend'}, 
-    'foot':{'fk':'foot_fk', 'control_fk':'c_foot_fk', 'snap_fk':'foot_snap_fk', 'ik':'foot_ik', 'ik_target':'foot_ik_target', 'control_ik':'c_foot_ik', 'deform':'foot', 'pole':'foot_pole', 'fk_scale_fix':'c_foot_fk_scale_fix', 'shape_override_fk':'c_p_foot_fk', 'shape_override_ik':'c_p_foot_ik', 'bank_01':'c_foot_bank_01', 'bank_02':'c_foot_bank_02', 'foot_heel':'c_foot_heel', 'control_reverse':'c_foot_01', 'pole_01':'foot_01_pole', 'roll':'c_foot_roll', 'control_roll':'c_foot_roll_cursor', 'secondary_00':'foot_bend', 'control_ik_offset':'c_foot_ik_offset'}, 
-    'toes':{'01': 'toes_01', '02': 'toes_02', '01_ik': 'toes_01_ik', 'control_fk': 'c_toes_fk', 'control_ik':'c_toes_ik', 'toes_track': 'c_toes_track', 'toes_end': 'c_toes_end', 'toes_end_01':'c_toes_end_01', 'control_pivot':'c_toes_pivot'}, 
+    'calf':{'base':'leg', 'fk':'leg_fk', 'ik':'leg_ik', 'ik_nostr':'leg_ik_nostr', 'control_fk':'c_leg_fk', 'control_ik3':'c_leg_ik3', 'twist':'leg_twist', 'stretch':'leg_stretch', 'secondary_00':'c_knee_bend', 'secondary_01':'c_leg_bend_01', 'secondary_02':'c_leg_bend_02', 'secondary_03':'c_ankle_bend'}, 
+    'foot':{'fk':'foot_fk', 'control_fk':'c_foot_fk', 'snap_fk':'foot_snap_fk', 'ik':'foot_ik', 'ik_target':'foot_ik_target', 'control_ik':'c_foot_ik', 'deform':'foot', 'pole':'foot_pole', 'fk_scale_fix':'foot_fk_scale_fix', 'shape_override_fk':'c_p_foot_fk', 'shape_override_ik':'c_p_foot_ik', 'bank_01':'foot_bank_01', 'bank_02':'foot_bank_02', 'foot_heel':'foot_heel', 'control_reverse':'c_foot_01', 'pole_01':'foot_01_pole', 'roll':'foot_roll', 'control_roll':'c_foot_roll_cursor', 'secondary_00':'foot_bend', 'ik_pivot':'foot_ik_pivot', 'control_ik_pivot':'c_foot_ik_pivot','control_ik_offset':'c_foot_ik_offset', 'foot_fans_helper':'foot_fans_h'}, 
+    'toes':{'01': 'toes_01', '02': 'toes_02', '01_ik': 'toes_01_ik', 'control_fk': 'c_toes_fk', 'control_ik':'c_toes_ik', 'toes_track': 'toes_track', 'toes_end': 'toes_end', 'toes_end_01':'toes_end_01', 'control_pivot':'c_toes_pivot'}, 
     'prepole':'leg_fk_pre_pole', 
     'control_pole_ik':'c_leg_pole',
+    'pole_line': 'leg_pole_line',
     'fk_pole':'leg_fk_pole',
     'control_stretch':'c_stretch_leg',
     'control_pin':'c_stretch_leg_pin',
@@ -196,6 +209,7 @@ leg_bones_dict = {
     'toes_middle_base': 'c_toes_middle1_base', 
     'toes_ring_base': 'c_toes_ring1_base', 
     'toes_pinky_base': 'c_toes_pinky1_base',
+    'toes_pinky_auto': 'c_toes_pinky1_base_auto'
     }
 
 leg_bones_list = []
@@ -229,10 +243,12 @@ leg_deform = [
     leg_bones_dict['toes_middle_base'],
     leg_bones_dict['toes_ring_base'],
     leg_bones_dict['toes_pinky_base'],
-    leg_bones_dict['toes']['01'], leg_bones_dict['thigh']['twist'], leg_bones_dict['calf']['stretch'], leg_bones_dict['calf']['twist'], leg_bones_dict['thigh']['stretch'], leg_bones_dict['upthigh']]
+    leg_bones_dict['toes']['01'], leg_bones_dict['thigh']['twist'], leg_bones_dict['calf']['stretch'], 
+    leg_bones_dict['calf']['twist'], leg_bones_dict['thigh']['stretch'], leg_bones_dict['upthigh'],
+    leg_bones_dict['upthigh2']]
 
 leg_control = [
-    leg_bones_dict['upthigh'], leg_bones_dict['thigh']['control_fk'], leg_bones_dict['thigh']['control_ik'], leg_bones_dict['calf']['control_fk'], leg_bones_dict['toes_pinky1'], leg_bones_dict['toes_pinky2'], leg_bones_dict['toes_pinky3'], leg_bones_dict['toes_ring1'], leg_bones_dict['toes_ring2'], leg_bones_dict['toes_ring3'], leg_bones_dict['toes_middle1'], leg_bones_dict['toes_middle2'], leg_bones_dict['toes_middle3'], leg_bones_dict['toes_index1'], leg_bones_dict['toes_index2'], leg_bones_dict['toes_index3'], leg_bones_dict['toes_thumb1'], leg_bones_dict['toes_thumb2'], leg_bones_dict['foot']['control_fk'], leg_bones_dict['toes']['control_fk'], leg_bones_dict['control_stretch'], leg_bones_dict['calf']['secondary_03'], leg_bones_dict['calf']['secondary_02'], leg_bones_dict['calf']['secondary_01'], leg_bones_dict['calf']['secondary_00'], leg_bones_dict['thigh']['secondary_02'], leg_bones_dict['thigh']['secondary_01'], leg_bones_dict['thigh']['secondary_00'], leg_bones_dict['control_pin'], leg_bones_dict['foot']['control_ik'], leg_bones_dict['foot']['control_ik_offset'], leg_bones_dict['toes']['control_ik'], leg_bones_dict['foot']['control_reverse'], leg_bones_dict['foot']['control_roll'], leg_bones_dict['control_pole_ik']]
+    leg_bones_dict['upthigh'], leg_bones_dict['thigh']['control_fk'], leg_bones_dict['thigh']['control_ik'], leg_bones_dict['calf']['control_fk'], leg_bones_dict['toes_pinky1'], leg_bones_dict['toes_pinky2'], leg_bones_dict['toes_pinky3'], leg_bones_dict['toes_ring1'], leg_bones_dict['toes_ring2'], leg_bones_dict['toes_ring3'], leg_bones_dict['toes_middle1'], leg_bones_dict['toes_middle2'], leg_bones_dict['toes_middle3'], leg_bones_dict['toes_index1'], leg_bones_dict['toes_index2'], leg_bones_dict['toes_index3'], leg_bones_dict['toes_thumb1'], leg_bones_dict['toes_thumb2'], leg_bones_dict['foot']['control_fk'], leg_bones_dict['toes']['control_fk'], leg_bones_dict['control_stretch'], leg_bones_dict['calf']['secondary_03'], leg_bones_dict['calf']['secondary_02'], leg_bones_dict['calf']['secondary_01'], leg_bones_dict['calf']['secondary_00'], leg_bones_dict['thigh']['secondary_02'], leg_bones_dict['thigh']['secondary_01'], leg_bones_dict['thigh']['secondary_00'], leg_bones_dict['control_pin'], leg_bones_dict['foot']['control_ik'], leg_bones_dict['foot']['control_ik_offset'], leg_bones_dict['foot']['control_ik_pivot'],leg_bones_dict['toes']['control_ik'], leg_bones_dict['foot']['control_reverse'], leg_bones_dict['foot']['control_roll'], leg_bones_dict['control_pole_ik']]
     
 
 leg_props = {'soft_ik': 'leg_softik', 'auto_ik_roll': 'leg_auto_ik_roll'}
@@ -276,7 +292,7 @@ def get_leg_joint_fans(leg_side, btype='ALL', no_side=False):
 
     for subtype in types:
         for i in range(1,32):
-            for lvl in ['thigh_in', 'thigh_out', 'knee_in', 'knee_out']:
+            for lvl in ['thigh_in', 'thigh_out', 'knee_in', 'knee_out', 'ankle_in', 'ankle_out']:
                 bname = ''            
                 if subtype == 'CONTROLLER':
                     bname = 'c_'+lvl+'_'+'%02d' % i +leg_side
@@ -314,7 +330,6 @@ head_control = [heads_dict['control']] + skulls
 head_bones = [j for i, j in heads_dict.items()] + skulls
 head_ref = ['head_ref.x']
 
-
 #   mouth
 mouth_bones_ref_dict = {'lips_top_mid': 'lips_top_ref.x',
                         'lips_top': 'lips_top_ref',
@@ -327,6 +342,7 @@ mouth_bones_ref_dict = {'lips_top_mid': 'lips_top_ref.x',
                         'lips_roll_top': 'lips_roll_top_ref.x',
                         'lips_roll_bot': 'lips_roll_bot_ref.x',   
                         'lips_offset': 'lips_offset_ref.x',
+                        'muzzle': 'muzzle_ref.x',
                         'jaw':'jaw_ref.x' 
                         }
                         
@@ -334,32 +350,44 @@ mouth_bones_dict = {
                     'c_jawbone': {'name':'c_jawbone.x', 'deform':False, 'control':True},
                     'jawbone': {'name':'jawbone.x', 'deform':True, 'control':False},
                     'jawbone_track':{'name':'jawbone_track.x', 'deform':False, 'control':False},
-                    'c_lips_bot_01_offset': {'name':'c_lips_bot_01_offset', 'deform':False, 'control':False},
-                    'c_lips_bot_01': {'name':'c_lips_bot_01', 'deform':True, 'control':True},
-                    'c_lips_bot_offset_mid': {'name':'c_lips_bot_offset.x', 'deform':False, 'control':False},
-                    'c_lips_bot_offset': {'name':'c_lips_bot_offset', 'deform':False, 'control':False},
-                    'c_lips_bot': {'name':'c_lips_bot', 'deform':True, 'control':True}, 
-                    'c_lips_bot_mid': {'name':'c_lips_bot.x', 'deform':True, 'control':True},
-                    'c_lips_roll_bot': {'name':'c_lips_roll_bot.x', 'deform':False, 'control':True},
-                    'c_lips_roll_top': {'name':'c_lips_roll_top.x', 'deform':False, 'control':True},                    
                     'jaw_ret_bone': {'name':'jaw_ret_bone.x', 'deform':False, 'control':False},
+                    
+                    'c_lips_top_mid': {'name':'c_lips_top.x', 'deform':True, 'control':True},                   
                     'c_lips_top_retain_mid': {'name':'c_lips_top_retain.x', 'deform':False, 'control':False},
-                    'c_lips_top_retain':{'name':'c_lips_top_retain', 'deform':False, 'control':False},
-                    'c_lips_top_01_retain': {'name':'c_lips_top_01_retain', 'deform':False, 'control':False},
-                    'c_lips_smile_retain': {'name':'c_lips_smile_retain', 'deform':False, 'control':False},
-                    'c_lips_bot_01_retain': {'name':'c_lips_bot_01_retain', 'deform':False, 'control':False},
-                    'c_lips_bot_retain': {'name':'c_lips_bot_retain', 'deform':False, 'control':False},
-                    'c_lips_bot_retain_mid': {'name':'c_lips_bot_retain.x', 'deform':False, 'control':False},
                     'c_lips_top_offset_mid': {'name':'c_lips_top_offset.x', 'deform':False, 'control':False},
-                    'c_lips_top_offset': {'name':'c_lips_top_offset', 'deform':False, 'control':False},
-                    'c_lips_top_mid': {'name':'c_lips_top.x', 'deform':True, 'control':True},
+                    
                     'c_lips_top': {'name':'c_lips_top', 'deform':True, 'control':True},
-                    'c_lips_top_01_offset': {'name':'c_lips_top_01_offset', 'deform':False, 'control':False},
+                    'c_lips_top_offset': {'name':'c_lips_top_offset', 'deform':False, 'control':False},
+                    'c_lips_top_retain':{'name':'c_lips_top_retain', 'deform':False, 'control':False},
+                    
                     'c_lips_top_01': {'name':'c_lips_top_01', 'deform':True, 'control':True},
-                    'c_lips_smile_offset': {'name':'c_lips_smile_offset', 'deform':False, 'control':False},
+                    'c_lips_top_01_offset': {'name':'c_lips_top_01_offset', 'deform':False, 'control':False},
+                    'c_lips_top_01_retain': {'name':'c_lips_top_01_retain', 'deform':False, 'control':False},
+                    
+                    'c_lips_bot_mid': {'name':'c_lips_bot.x', 'deform':True, 'control':True},             
+                    'c_lips_bot_offset_mid': {'name':'c_lips_bot_offset.x', 'deform':False, 'control':False},  
+                    'c_lips_bot_retain_mid': {'name':'c_lips_bot_retain.x', 'deform':False, 'control':False},
+                    
+                    'c_lips_bot': {'name':'c_lips_bot', 'deform':True, 'control':True}, 
+                    'c_lips_bot_offset': {'name':'c_lips_bot_offset', 'deform':False, 'control':False},
+                    'c_lips_bot_retain': {'name':'c_lips_bot_retain', 'deform':False, 'control':False},
+                    
+                    'c_lips_bot_01': {'name':'c_lips_bot_01', 'deform':True, 'control':True},
+                    'c_lips_bot_01_offset': {'name':'c_lips_bot_01_offset', 'deform':False, 'control':False},                 
+                    'c_lips_bot_01_retain': {'name':'c_lips_bot_01_retain', 'deform':False, 'control':False},                    
+                                          
                     'c_lips_smile': {'name':'c_lips_smile', 'deform':True, 'control':True},
+                    'c_lips_smile_offset': {'name':'c_lips_smile_offset', 'deform':False, 'control':False},            
+                    'c_lips_smile_retain': {'name':'c_lips_smile_retain', 'deform':False, 'control':False},
+                    
                     'c_lips_corner_mini': {'name':'c_lips_corner_mini', 'deform':True, 'control':True},
-                    'c_lips_offset': {'name':'c_lips_offset.x', 'deform':False, 'control':True}
+                    'c_lips_corner_mini_offset': {'name':'c_lips_corner_mini_offset', 'deform':False, 'control':False},
+                    'c_lips_corner_mini_retain': {'name':'c_lips_corner_mini_retain', 'deform':False, 'control':False},
+                    
+                    'c_lips_roll_bot': {'name':'c_lips_roll_bot.x', 'deform':False, 'control':True},
+                    'c_lips_roll_top': {'name':'c_lips_roll_top.x', 'deform':False, 'control':True},
+                    'c_lips_offset': {'name':'c_lips_offset.x', 'deform':False, 'control':True},
+                    'c_muzzle': {'name':'c_muzzle.x', 'deform':False, 'control':True}
                     }
                     
                     
@@ -394,7 +422,7 @@ def get_variable_lips(head_side, btype='REFERENCE', no_side=False, levels=['top_
     lips_list = []
 
     for subtype in types:
-        for lip_id in range(1,32):
+        for lip_id in range(1, 32):
             for _side in ['.l', '.r']:
                 for lvl in levels:
                     bname = ''
@@ -432,19 +460,20 @@ def get_lip_idx(name):
     return 0# no string idx found, is zero
     
     
-def get_eyelid_idx(name):
-    for i in name.split('_'):
-        i = i.split('.')[0]
-        if i.isdigit() and len(i) == 2:
-            return int(i)    
-    return 0# no string idx found, is zero
-    
-    
+
 # cheeks
 cheek_bones_ref_dict = {'cheek_smile': 'cheek_smile_ref',
-                        'cheek_inflate': 'cheek_inflate_ref'}
+                        'cheek_inflate': 'cheek_inflate_ref',
+                        'cheek_push': 'cheek_push_ref',
+                        'cheek_pole': 'cheek_pole_ref'}
 cheek_bones_dict = {'cheek_smile':{'name':'c_cheek_smile', 'deform':True, 'control':True}, 
-                    'cheek_inflate':{'name':'c_cheek_inflate', 'deform':True, 'control':True}
+                    'cheek_inflate':{'name':'c_cheek_inflate', 'deform':True, 'control':True},                    
+                    'cheek_push':{'name': 'cheek_push', 'deform':False, 'control':False},
+                    'cheek_push_target':{'name': 'cheek_push_tar', 'deform':False, 'control':False},
+                    'cheek_stretch':{'name': 'cheek_str', 'deform':False, 'control':False},                    
+                    'cheek_inflate_offset':{'name': 'cheek_inflate_off', 'deform':False, 'control':False},
+                    'cheek_smile_offset':{'name': 'cheek_smile_off', 'deform':False, 'control':False},
+                    'cheek_pole': {'name': 'cheek_pole', 'deform': False, 'control': False}
                     }
                     
 cheek_bones_base = [j['name'] for i, j in cheek_bones_dict.items()]
@@ -531,7 +560,6 @@ for i in teeth_ref_base:
         teeth_ref.append(i+'.r')
     
 # tongues
-
 tongue_bones_ref_dict = {'tong_01':'tong_01_ref.x',
                         'tong_02':'tong_02_ref.x',
                         'tong_03':'tong_03_ref.x'
@@ -548,6 +576,33 @@ tongue_bones_dict = {'c_tong_01': {'name':'c_tong_01.x', 'deform':False, 'contro
 tongue_ref = [j for i, j in tongue_bones_ref_dict.items()]
 tongue_bones = [tongue_bones_dict[i]['name'] for i in tongue_bones_dict]
 
+
+def get_tongues(side='.x', type='ALL', no_side=True, side_x=False):
+    list = []
+    ctrl = []
+    ref = []
+    deform = []
+    _side = '' if no_side else side
+    _sidex = '.x' if side_x else ''
+    for _i in range(1, 33):
+        stri = '%02d' % _i
+        if bpy.context.active_object.data.bones.get('tong_'+stri+'_ref'+side):
+            ctrl.append('c_tong_'+stri+_side+_sidex)
+            ref.append('tong_'+stri+'_ref'+_side+_sidex)
+            deform.append('tong_'+stri+_side+_sidex)
+            
+    if type == 'ALL':
+        list = ctrl + ref + deform
+    elif type == 'CTRL':
+        list = ctrl
+    elif type == 'REF':
+        list = ref
+    elif type == 'DEF':
+        list = deform
+    elif type == 'NON_REF':
+        list = ctrl + deform
+    
+    return list
     
     
 # eyes
@@ -588,12 +643,20 @@ eyelids_bones_ref_default_dict = {'eyelid_top_02': 'eyelid_top_02_ref',
                             'eyelid_top_03': 'eyelid_top_03_ref',
                             'eyelid_bot_02': 'eyelid_bot_02_ref',
                             'eyelid_bot_03': 'eyelid_bot_03_ref'}
+                            
                     
+def get_eyelid_idx(name):
+    for i in name.split('_'):
+        i = i.split('.')[0]
+        if i.isdigit() and len(i) == 2:
+            return int(i)    
+    return 0# no string idx found, is zero
+    
                     
 def get_variable_eyelids(head_side, eye_sides=['.l', '.r'], btype='REFERENCE', levels=['top_', 'bot_'], no_side=False):
     types = [btype]    
     if btype == 'ALL':
-        types = ['REFERENCE', 'CONTROLLER']
+        types = ['REFERENCE', 'CONTROLLER', 'CONT_MASTER', 'OFFSET']
    
     eyelids_list = []
 
@@ -604,9 +667,13 @@ def get_variable_eyelids(head_side, eye_sides=['.l', '.r'], btype='REFERENCE', l
                 for lvl in levels:
                     bname = ''
                     if subtype == 'REFERENCE':
-                        bname = 'eyelid_' + lvl + str_i + '_ref' + head_side[:-2] + _side
+                        bname = 'eyelid_'+lvl+str_i+'_ref'+head_side[:-2]+_side
                     elif subtype == 'CONTROLLER':
                         bname = 'c_eyelid_' + lvl + str_i + head_side[:-2] + _side
+                    elif subtype == 'CONT_MASTER':
+                        bname = 'c_eyelid_'+lvl+str_i+'_master'+head_side[:-2]+_side
+                    elif subtype == 'OFFSET':
+                        bname = 'eyelid_'+lvl+str_i+'_offset'+head_side[:-2]+_side
                     
                     if bpy.context.active_object.data.bones.get(bname):
                         if no_side:
@@ -647,7 +714,42 @@ eyebrow_ref = [j for i, j in eyebrow_bones_ref_dict.items()]
 eyebrow_bones_left = [i+'.l' for i in eyebrow_bones] + [i+'.l' for i in eyebrow_ref]
 eyebrow_bones_right = [i+'.r' for i in eyebrow_bones] + [i+'.r' for i in eyebrow_ref]
 
+
+def get_eyebrows(side='.l', type='ALL', include_full=True, with_side=False):
+    list = []
+    main_ctrl = []
+    ref = []    
     
+    if side.endswith('.x'): 
+        side = side[:-2]+'.l'# same count for left and right brows for now    
+    
+    side_suff = '' if with_side == False else side
+    
+    for _i in range(0, 32):
+        stri = '%02d' % _i if _i > 0 else '01_end'
+        if bpy.context.active_object.data.bones.get('eyebrow_'+stri+'_ref'+side):
+            main_ctrl.append('c_eyebrow_'+stri+side_suff)
+            ref.append('eyebrow_'+stri+'_ref'+side_suff)
+
+        
+    master_ctrl = [eyebrow_bones_dict['eyebrow_full']['name']+side_suff]
+    master_ref = [eyebrow_bones_ref_dict['eyebrow_full']+side_suff]
+    
+    if type == 'ALL':
+        list = main_ctrl + ref
+        if include_full:
+            list += master_ctrl + master_ref
+    elif type == 'CTRL':
+        list = main_ctrl
+        if include_full:
+            list += master_ctrl
+    elif type == 'REF':
+        list = ref
+        if include_full:
+            list += master_ref
+    
+    return list
+
 
 #   facial
 facial_ref_dict = {}            
@@ -723,45 +825,68 @@ subnecks = ['subneck_']
 
 # SPINE
 def get_spine_name(type, idx):
+    # get spine bone name by type
+    # only supports a single side for now, .x
+    _s = '.x'
     str_idx = '%02d' % idx    
     
     if type == 'ref':
-        return'spine_'+str_idx+'_ref'+'.x'  
+        return'spine_'+str_idx+'_ref'+_s
         
     elif type == 'control':
-        return 'c_spine_'+str_idx+'.x'  
+        return 'c_spine_'+str_idx+_s
         
     elif type == 'control_bend':
-        return 'c_spine_'+str_idx+'_bend'+'.x'   
+        return 'c_spine_'+str_idx+'_bend'+_s
         
     elif type == 'base':
-        return 'spine_'+str_idx+'.x'        
+        return 'spine_'+str_idx+_s  
         
     elif type == 'shape_override':
-        return 'c_p_spine_'+str_idx+'.x'
+        return 'c_p_spine_'+str_idx+_s
         
     elif type == 'control_proxy':
-        return 'c_spine_'+str_idx+'_proxy'+'.x'
+        return 'c_spine_'+str_idx+'_proxy'+_s
         
     elif type == 'control_bend_proxy':
-        return 'c_spine_'+str_idx+'_bend_proxy'+'.x'
+        return 'c_spine_'+str_idx+'_bend_proxy'+_s
+        
+    elif type == 'control_reverse':
+        if idx == 0:
+            return spine_bones_dict['c_root_rev']
+        else:
+            return 'c_spine_'+str_idx+'_rev'+_s
+        
+    elif type == 'control_reverse_proxy':
+        if idx == 0:
+            return 'c_root_rev_proxy'+_s
+        else:
+            return 'c_spine_'+str_idx+'_rev_proxy'+_s
+        
+    
+    
         
         
-def get_spine_idx(name):    
-    for i in name.split('_'):        
-        if i.isdigit() and len(i) == 2:            
-            return int(i)  
-            
+def get_spine_idx(name, type='int'):    
+    for i in name.split('_'):
+        i = i.split('.')[0]# remove side chars
+        if i.isdigit() and len(i) == 2: 
+            if type == 'int':
+                return int(i)
+            elif type == 'string':
+                return i
     return None
         
 
 spine_bones_dict = {
     'c_root_master': 'c_root_master.x', 'c_root':'c_root.x', 'root':'root.x', 'c_root_bend':'c_root_bend.x', 
+    'c_root_rev':'c_root_rev.x',
     'c_waist_bend':'c_waist_bend.x', 'root_master_shape_override':'c_p_root_master.x', 'root_shape_override':'c_p_root.x', 
     'spine_01_shape_override':get_spine_name('shape_override', 1), 'spine_02_shape_override':get_spine_name('shape_override', 2), 
     'c_spine_01':get_spine_name('control', 1), 'spine_01':get_spine_name('base', 1), 'c_spine_01_bend':get_spine_name('control_bend', 1), 'spine_01_cns': 'spine_01_cns.x', 
     'c_spine_02':get_spine_name('control', 2), 'spine_02':get_spine_name('base', 2), 'c_spine_02_bend':get_spine_name('control_bend', 2), 'spine_02_cns': 'spine_02_cns.x',
-    'c_spine_master': 'c_spine_master.x', 'stretchy': 'spine_stretchy.x'}
+    'c_spine_master': 'c_spine_master.x', 'stretchy': 'spine_stretchy.x',
+    'c_spine_master_rev': 'c_spine_master_rev.x', 'stretchy_rev': 'spine_stretchy_rev.x'}
 
 spine_bones = [j for i, j in spine_bones_dict.items()]
 
@@ -808,17 +933,16 @@ spline_ik_bones = ['c_spline_root', 'spline_stretch', 'c_spline_curvy', 'c_splin
 
 def get_spline_ik(rig, side):
     for ch in rig.children:
-        if ch.type == 'CURVE' and ch.name.startswith("spline_ik_curve"+side):
+        if ch.type == 'CURVE' and ch.name.startswith('spline_ik_curve'+side):
             return ch
     return None
 
 
-# Tail
-tail_bones = ['c_tail_master']
-
 
 #SMART FACIAL MARKERS
-facial_markers = {'eyebrow_01_end.l': 15, 'eyebrow_01.l':16, 'eyebrow_02.l':17, 'eyebrow_03.l':18, 'eyebrow_01_end.r':40, 'eyebrow_01.r':41, 'eyebrow_02.r':42, 'eyebrow_03.r':43,
+facial_markers = {
+'eyebrow_01_end.l': 15, 'eyebrow_01.l':16, 'eyebrow_02.l':17, 'eyebrow_03.l':18, 
+'eyebrow_01_end.r':40, 'eyebrow_01.r':41, 'eyebrow_02.r':42, 'eyebrow_03.r':43,
 'eyelid_corner_01.l':7, 'eyelid_bot_01.l':6, 'eyelid_bot_02.l':5, 'eyelid_bot_03.l':12, 'eyelid_corner_02.l':11, 'eyelid_top_03.l':10, 'eyelid_top_02.l':9, 'eyelid_top_01.l':8, 'eyelid_corner_01.r':30, 'eyelid_bot_01.r':29, 'eyelid_bot_02.r':28, 'eyelid_bot_03.r':35, 'eyelid_corner_02.r':34, 'eyelid_top_03.r':33, 'eyelid_top_02.r':32, 'eyelid_top_01.r':31,
 'nose_03.x':36, 'nose_01.x':37, 
 'cheek_smile.l':13, 'cheek_inflate.l':14, 'cheek_smile.r':38, 'cheek_inflate.r':39, 

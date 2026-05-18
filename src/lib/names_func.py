@@ -15,3 +15,9 @@ def trim_dupli_name(name):
         
     else:
         return name
+        
+
+def byte_size(s: str, encoding: str = "utf-8") -> int:
+    # get the number of bytes required to store a string
+    # using the given encoding (default: UTF-8).    
+    return len(s.encode(encoding))

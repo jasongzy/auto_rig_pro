@@ -5,6 +5,10 @@ from .maths_geo import *
 from .collections import *
 from .. import auto_rig_datas as ard
 
+def init_bone_coordinates(edit_bone):
+    edit_bone.head = [0,0,0]
+    edit_bone.tail = [0,0,0.1]
+
 
 def is_deforming(bone):
     if get_edit_bone(bone):
@@ -81,27 +85,34 @@ def rotate_edit_bone(edit_bone, angle_radian, axis):
     align_bone_x_axis(edit_bone, new_x_axis)
 
 
-def create_edit_bone(bone_name, deform=False):
-    b = get_edit_bone(bone_name)
-    if b == None:
-        b = bpy.context.active_object.data.edit_bones.new(bone_name)
-        b.use_deform = deform
-    return b
+def create_edit_bone(bone_name, deform=False, tag=None):
+    _b = bpy.context.active_object.data.edit_bones.get(bone_name)
+    if _b == None:
+        _b = bpy.context.active_object.data.edit_bones.new(bone_name)
+        _b.use_deform = deform
+        _b.head = Vector((0.0,0.0,0.0))
+        _b.tail = Vector((0.0,0.0,0.1))
+        #init_bone_coordinates(_b)
+        
+    if tag:# optional tag as custom prop
+        _b[tag] = 1
+        
+    return _b
 
 
-def select_edit_bone(name, mode=1):
-    o = bpy.context.active_object
-    ebone = get_edit_bone(name)
+def select_edit_bone(_name, mode=1):
+    _o = bpy.context.active_object
+    _ebone = get_edit_bone(_name)
 
     if mode == 1:
-        o.data.bones.active = o.pose.bones[name].bone
+        _o.data.bones.active = _o.pose.bones[_name].bone
     elif mode == 2:
-        o.data.edit_bones.active = o.data.edit_bones[name]
-        o.data.edit_bones.active.select = True
+        _o.data.edit_bones.active = _o.data.edit_bones[_name]
+        _o.data.edit_bones.active.select = True
 
-    ebone.select_head = True
-    ebone.select_tail = True
-    ebone.select = True
+    _ebone.select_head = True
+    _ebone.select_tail = True
+    _ebone.select = True
 
 
 def delete_edit_bone(editbone):

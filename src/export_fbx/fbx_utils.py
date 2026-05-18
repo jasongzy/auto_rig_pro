@@ -350,7 +350,7 @@ def _mat4_vec3_array_multiply(mat4, vec3_array, dtype=None, return_4d=False):
 
     # column_vector_multiplication in mathutils_Vector.c uses double precision math for Matrix @ Vector by casting the
     # matrix's values to double precision and then casts back to single precision when returning the result, so at least
-    # double precision math is always be used to match standard Blender behaviour.
+    # double precision math is always be used to match standard Blender behavior.
     math_precision = np.result_type(np.double, vec3_array)
 
     to_multiply = None
@@ -526,7 +526,7 @@ def fast_first_axis_unique(ar, return_unique=True, return_index=False, return_in
 
     Float type caveats:
     All elements of -0.0 in the input array will be replaced with 0.0 to ensure that both values are collapsed into one.
-    NaN values can have lots of different byte representations (e.g. signalling/quiet and custom payloads). Only the
+    NaN values can have lots of different byte representations (e.g. signaling/quiet and custom payloads). Only the
     duplicates of each unique byte representation will be collapsed into one."""
     # At least something should always be returned.
     assert(return_unique or return_index or return_inverse or return_counts)
@@ -720,7 +720,7 @@ class AttributeDescription:
     domain: str
     # Some attributes are required to exist if certain conditions are met. If a required attribute does not exist when
     # attempting to get it, an AssertionError is raised.
-    is_required_check: Callable[[bpy.types.AttributeGroup], bool] = None
+    is_required_check: Callable[[bpy.types.AttributeGroupMesh if bpy.app.version >= (4,3,0) else bpy.types.AttributeGroup], bool] = None
     # NumPy dtype that matches the internal C data of this attribute.
     dtype: np.dtype = field(init=False)
     # The default attribute name to use with foreach_get and foreach_set.
@@ -837,7 +837,7 @@ def _key_to_uuid(uuids, key):
             uuid += inc
             if 0 > uuid >= 2**63:
                 # Note that this is more that unlikely, but does not harm anyway...
-                raise ValueError("Unable to generate an UUID for key {}".format(key))
+                raise ValueError("Unable to generate an UUID for key {!r}".format(key))
     return UUID(uuid)
 
 
@@ -1338,7 +1338,6 @@ class AnimationCurveNodeWrapper:
         min_reldiff_fac = fac * 1.0e-3  # min relative value evolution: 0.1% of current 'order of magnitude'.
         min_absdiff_fac = 0.1  # A tenth of reldiff...
                          
-
         # Initialise to no values enabled for writing.
         self._frame_write_mask_array[:] = False
 
@@ -1371,11 +1370,7 @@ class AnimationCurveNodeWrapper:
             # Note that we ignore the '/ 2' part here, since it's not much significant for us.
             # Contracted form using only builtin Python functions:
             #     return abs(a - b) > (min_reldiff_fac * max(abs(a) + abs(b), min_absdiff_fac))
-            abs_diff = np.abs(c_val_view - p_val_view)
-                                         
-                                           
-                                      
-                                         
+            abs_diff = np.abs(c_val_view - p_val_view)                                                                                           
             different_if_greater_than = min_reldiff_fac * np.maximum(c_abs_val_view + p_abs_val_view, min_absdiff_fac)
             enough_diff_p_val_mask = abs_diff > different_if_greater_than
             # Enable both the current values *and* the previous values where `enough_diff_p_val_mask` is True. Some
@@ -1740,7 +1735,7 @@ class ObjectWrapper(metaclass=MetaObjectWrapper):
                 if par_type in {'OBJECT', 'BONE'}:
                     return True
                 else:
-                    print("Sorry, “{}” parenting type is not supported".format(par_type))
+                    print("Sorry, \"{:s}\" parenting type is not supported".format(par_type))
                     return False
             return True
         return False
@@ -1918,9 +1913,9 @@ FBXExportSettings = namedtuple("FBXExportSettings", (
     "armature_nodetype", "use_armature_deform_only", "add_leaf_bones",
     "bone_correction_matrix", "bone_correction_matrix_inv",
     "bake_anim", "bake_anim_use_all_bones", "bake_anim_use_nla_strips", "bake_anim_use_all_actions",
-    "bake_anim_step", "bake_anim_simplify_factor", "bake_anim_force_startend_keying",
+    "bake_anim_step", "bake_anim_simplify_factor", "bake_anim_force_startend_keying",    
     "use_metadata", "media_settings", "use_custom_props", "colors_type", "prioritize_active_color",
-    "shape_keys_baked_data_dict", "mesh_names_data_dict", "export_action_only" # Auto-Rig Pro implant
+    "shape_keys_baked_data_dict", "mesh_names_data_dict", "export_action_only", "bake_anim_force_startend_keying_sk" # Auto-Rig Pro implant
 ))
 
 # Helper container gathering some data we need multiple times:
@@ -1949,5 +1944,5 @@ FBXImportSettings = namedtuple("FBXImportSettings", (
     "use_custom_props", "use_custom_props_enum_as_string",
     "nodal_material_wrap_map", "image_cache",
     "ignore_leaf_bones", "force_connect_children", "automatic_bone_orientation", "bone_correction_matrix",
-    "use_prepost_rot", "colors_type",
+    "use_prepost_rot", "colors_type", "mtl_name_collision_mode",
 ))

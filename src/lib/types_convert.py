@@ -1,5 +1,19 @@
+import bpy
 from math import *
 from mathutils import *
+
+
+def propmatrix_to_matrix(arr):
+    if bpy.app.version >= (5,0,0):
+        return Matrix([
+            [arr[0], arr[4], arr[8], arr[12]],
+            [arr[1], arr[5], arr[9], arr[13]],
+            [arr[2], arr[6], arr[10], arr[14]],
+            [arr[3], arr[7], arr[11], arr[15]],
+            ])
+    else:
+        return Matrix(arr)
+    
 
 def vectorize3(list):
     return Vector((list[0], list[1], list[2]))

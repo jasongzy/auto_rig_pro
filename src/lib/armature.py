@@ -27,6 +27,7 @@ def set_bone_layer(bone, layer_type, show_new_layer=False, multi=False):
         if col == None:# create the collection if necessary
             col = arma.data.collections.new(layer_type)
             col.is_visible = show_new_layer
+            col['arp_collec'] = True# custom tag
             
         if bpy.context.mode == 'EDIT_ARMATURE':
             col.assign(bone)
@@ -57,6 +58,11 @@ def set_bone_layer(bone, layer_type, show_new_layer=False, multi=False):
         for i, lay in enumerate(bone.layers):
             if i != layer_idx:
                 bone.layers[i] = False
+                
+                
+def is_arp_collec(col):
+    if col.name in ard.layer_col_map or col.name in ard.layer_col_map_special or col.name.startswith('color_body.') or col.name.startswith('mch_'):
+        return True
                 
                 
 def is_bone_in_layer(bone_name, layer_type):
@@ -109,13 +115,20 @@ def hide_layer(layer_type):
         bpy.context.active_object.data.layers[layer_idx] = False
         
         
-def enable_layer_exclusive(layer_type):
+def enable_layer_exclusive(layer_type, use_solo=False):
+    if bpy.app.version >= (4,1,0) and use_solo:
+        for col in get_armature_collections(bpy.context.active_object):
+            col.is_solo = col.name == layer_type
+            if col.name == layer_type:
+                col.is_visible = True
+        return
+    
     if bpy.app.version >= (4,0,0):
         for col in get_armature_collections(bpy.context.active_object):
             # ensure to disable pinned collections (Blender 4.1+)
             if bpy.app.version >= (4,1,0):
                 col.is_solo = False
-                
+            
             if col.name == layer_type:
                 col.is_visible = True
             else:
@@ -130,7 +143,7 @@ def enable_layer_exclusive(layer_type):
             if i != layer_idx:
                 bpy.context.active_object.data.layers[i] = False
                 
-        
+
 def enable_layer(layer_type):
     if bpy.app.version >= (4,0,0):
         col = get_armature_collections(bpy.context.active_object).get(layer_type)
@@ -148,7 +161,12 @@ def restore_armature_layers(layers_select):
         for col_name in layers_select:
             col = get_armature_collections(bpy.context.active_object).get(col_name)
             if col:# may have been renamed or deleted
-                col.is_visible = layers_select[col_name]
+                if bpy.app.version >= (4,1,0):
+                    viz, solo = layers_select[col_name]
+                    col.is_visible = viz
+                    col.is_solo = solo
+                else:
+                    col.is_visible = layers_select[col_name]
             
         for col in get_armature_collections(bpy.context.active_object):#disable newly created layers
             if not col.name in layers_select:
@@ -171,7 +189,13 @@ def enable_all_armature_layers():
         
         for col in get_armature_collections(bpy.context.active_object):
             layers_select[col.name] = col.is_visible
+            if bpy.app.version >= (4,1,0):
+                layers_select[col.name] = col.is_visible, col.is_solo
+                col.is_solo = False
+                
             col.is_visible = True
+            
+            
             
         return layers_select
         

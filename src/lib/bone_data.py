@@ -4,14 +4,15 @@ from .objects import *
 class ARP_BonesData:
     custom_bones_list = []
     softlink_bones = []
+    const_interp_bones = []
+    excluded_bones = []
     armature_name = ''
-    #renamed_bones = {}
-    
+   
     def init_values(self):
         self.custom_bones_list = []
-        self.softlink_bones = []
-        #self.renamed_bones = {}
+        self.softlink_bones = []       
         self.const_interp_bones = []
+        self.excluded_bones = []
         
     def collect(self, arm_name):  
         self.armature_name = arm_name
@@ -37,15 +38,15 @@ class ARP_BonesData:
                 if "softlink" in b.keys():
                     if not b.name in self.softlink_bones:
                         self.softlink_bones.append(b.name)
-                        add_stretch_bones(b)
-                        
-                #if 'rename' in b.keys():
-                #    if not b.name in self.renamed_bones:
-                #        self.renamed_bones[b.name] = b['rename']
-                        
+                        add_stretch_bones(b)                        
+              
                 if 'const_interp' in b.keys():
                     if not b.name in self.const_interp_bones:
                         self.const_interp_bones.append(b.name)
+                        
+                if 'exclude' in b.keys():
+                    if not b.name in self.excluded_bones:
+                        self.excluded_bones.append(b.name)
 
             if b.name.startswith("cc_"):
                 found_bone = True
@@ -72,15 +73,15 @@ class ARP_BonesData:
                 if "softlink" in b.keys():
                     if not b.name in self.softlink_bones:
                         self.softlink_bones.append(b.name)
-                        add_stretch_bones(b)
-                        
-                #if 'rename' in b.keys():
-                #    if not b.name in self.renamed_bones:
-                #        self.renamed_bones[b.name] = b['rename']
-                        
+                        add_stretch_bones(b)                        
+            
                 if 'const_interp' in b.keys():
                     if not b.name in self.const_interp_bones:
                         self.const_interp_bones.append(b.name)
+                        
+                if 'exclude' in b.keys():
+                    if not b.name in self.excluded_bones:
+                        self.excluded_bones.append(b.name)
         
         
     
@@ -103,6 +104,10 @@ def is_const_interp_bone(bone_name):
     return bone_name in arp_bones_data.const_interp_bones
     
     
+def is_excluded_bone(bone_name):
+    return bone_name in arp_bones_data.excluded_bones
+    
+    
 def get_renamed_bone(bone_name):
     if bone_name in arp_bones_data.renamed_bones:
         return arp_bones_data.renamed_bones[bone_name]
@@ -121,7 +126,7 @@ def retarget_bone_side(bone_name, target_side, dupli_only=False):#"head.x", "_du
     base_name = get_bone_base_name(bone_name)#'head'
     new_name = ""
         
-    if dupli_only:# we only want to set the dupli target side and preserve the left/right/center end letters
+    if dupli_only:# we only want to set the dupli ID and preserve the left/right/center side suffix
         current_side_letters = bone_name[-2:]#.l
         dupli_side = target_side[:-2]#'_dupli_001' or ''
         new_name = base_name+dupli_side+current_side_letters #'eyelid'+'_dupli_001'+'.l'        
@@ -162,3 +167,17 @@ def duplicate(type=None):
         bpy.ops.armature.duplicate_move(ARMATURE_OT_duplicate={}, TRANSFORM_OT_translate={"value": (0.0, 0.0, 0.0), "constraint_axis": (False, False, False),"orient_type": 'LOCAL', "mirror": False, "use_proportional_edit": False, "snap": False, "remove_on_cancel": False, "release_confirm": False})
     elif type == "OBJECT":
         bpy.ops.object.duplicate(linked=False, mode='TRANSLATION')
+        
+        
+def get_bone_children(b):
+    children_list = []
+    children_list = get_bone_children_recur(b, list=children_list)
+    return children_list
+    
+    
+def get_bone_children_recur(b, list=None):
+    if b.children:
+        for child in b.children:          
+            list.append(child)            
+            get_bone_children_recur(child, list=list)
+    return list

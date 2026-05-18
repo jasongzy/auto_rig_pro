@@ -5,15 +5,62 @@ from .version import *
 from .sys_print import *
 
 
+def create_action(actionname):
+    new_act = bpy.data.actions.new(actionname)
+    if bpy.app.version >= (5,0,0):
+        slot = new_act.slots.new('OBJECT', 'Slot 1')
+        actlay = new_act.layers.new('Layer')
+        actlay.strips.new(type='KEYFRAME')
+    return new_act
+
+
+def assign_armature_action(armature, _action, _slot_idx=0):
+    if armature.animation_data:
+        armature.animation_data.action = _action
+        if bpy.app.version >= (4,4,0) and _action != None:
+            if len(_action.slots):# debug old files compatibility
+                armature.animation_data.action_slot = _action.slots[_slot_idx]
+
+
+def get_action_slot_idx(act, act_slot):
+    for sloti, slot in enumerate(act.slots):
+        if slot == act_slot:
+            return sloti
+    return 0# safety
+            
+            
+def get_action_slot_name(act, act_slot_idx):
+    for sloti, slot in enumerate(act.slots):
+        if sloti == act_slot_idx:
+            return slot.name_display
+
+
+def get_action_slot_frame_range(act, slot_idx):
+    cb = act.layers[0].strips[0].channelbag(act.slots[slot_idx])
+    min = float('inf')
+    max = -min
+    if cb:
+        for fc in cb.fcurves:
+            for kf in fc.keyframe_points:
+                kf_x = kf.co[0]
+                if kf_x < min:
+                    min = kf_x
+                if kf_x > max:
+                    max = kf_x
+    
+    return min, max
+
+
 def nla_exit_tweak():
     active_obj = bpy.context.active_object
     if active_obj.animation_data:        
         if active_obj.animation_data.use_tweak_mode:
             print('NLA is in tweak mode, disable it')            
-            active_action = active_obj.animation_data.action
+            #active_action = active_obj.animation_data.action
             active_obj.animation_data.use_tweak_mode = False
-            # on exit, the active action is set to None. Bring it back
-            active_obj.animation_data.action = active_action
+            # Disable current action restore for now, buggy in some cases. To investigate later
+            #   on exit, the active action is set to None. Bring it back
+            #   active_obj.animation_data.action = active_action
             return True
     return False
     
@@ -102,7 +149,7 @@ def bake_anim(frame_start=0, frame_end=10, only_selected=False, bake_bones=True,
         matrices_dict = {}
 
         for pbone in armature.pose.bones:
-            if only_selected and not pbone.bone.select:
+            if only_selected and not is_pbone_selected(pbone):#pbone.bone.select:
                 continue
 
             def_matrix = None
@@ -218,18 +265,20 @@ def bake_anim(frame_start=0, frame_end=10, only_selected=False, bake_bones=True,
                 _self.shape_keys_data[dict_entry] = sk.value
                 
 
-        print_progress_bar("Baking phase 1", f-frame_start, frame_end-frame_start)
+        print_progress_bar("Baking", f-frame_start, frame_end-frame_start, start_percent=0, end_percent=90)
         f += sampling_rate
         f = round(f, 3)# round frame value because of decimals issues
         
-    print("")
+    #print("")
 
     # set new action
     action = None
     if new_action:
-        action = bpy.data.actions.new(new_action_name)
+        #action = bpy.data.actions.new(new_action_name)
+        action = create_action(new_action_name)
         anim_data = armature.animation_data_create()
-        anim_data.action = action
+        #anim_data.action = action
+        assign_armature_action(armature, action)
     else:
         action = armature.animation_data.action
 
@@ -241,17 +290,16 @@ def bake_anim(frame_start=0, frame_end=10, only_selected=False, bake_bones=True,
         keyframes[fc_key].extend((frame, value))
 
 
-    # set transforms and store keyframes
-    
+    # set transforms and store keyframes    
     if bake_bones:
         bone_count = 0
         total_bone_count = len(armature.pose.bones)      
         
         for pbone in armature.pose.bones:
             bone_count += 1
-            print_progress_bar("Baking phase 2", bone_count, total_bone_count)
+            print_progress_bar("Baking", bone_count, total_bone_count, start_percent=90, end_percent=100)
 
-            if only_selected and not pbone.bone.select:
+            if only_selected and not is_pbone_selected(pbone):#pbone.bone.select:
                 continue       
 
             euler_prev = None
@@ -260,10 +308,12 @@ def bake_anim(frame_start=0, frame_end=10, only_selected=False, bake_bones=True,
 
             for (f, matrix) in bones_data:
                 # optional, only keyframe given frames
-                if keyframes_dict:
+                if keyframes_dict and len(keyframes_dict):
+                    if not pbone.name in keyframes_dict: continue
+                    
                     keyf_list = keyframes_dict[pbone.name]
-                    if not f in keyf_list:
-                        continue
+                    
+                    if not f in keyf_list: continue
                         
                 pbone.matrix_basis = matrix[pbone.name].copy()
                 
@@ -304,16 +354,19 @@ def bake_anim(frame_start=0, frame_end=10, only_selected=False, bake_bones=True,
                     store_keyframe(pbone.name, "scale", arr_idx, f, value)
 
             # Add keyframes
-            fi = 0
+
             for fc_key, key_values in keyframes.items():
                 data_path, index = fc_key
-                fcurve = action.fcurves.find(data_path=data_path, index=index)
+                #fcurve = action.fcurves.find(data_path=data_path, index=index)
+                fcurve = find_fcurve(action, data_path, fc_index=index)
                 if new_action == False and fcurve:# for now always remove existing keyframes if overwriting current action, must be driven by constraints only
                     action.fcurves.remove(fcurve)
-                    fcurve = action.fcurves.new(data_path, index=index, action_group=pbone.name)
+                    #fcurve = action.fcurves.new(data_path, index=index, action_group=pbone.name)
+                    fcurve = create_fcurve(action, data_path, fc_index=index, action_group=pbone.name)
                 if fcurve == None:
-                    fcurve = action.fcurves.new(data_path, index=index, action_group=pbone.name)
-
+                    #fcurve = action.fcurves.new(data_path, index=index, action_group=pbone.name)
+                    fcurve = create_fcurve(action, data_path, fc_index=index, action_group=pbone.name)
+                    
                 # set keyframes points
                 num_keys = len(key_values) // 2
                 fcurve.keyframe_points.add(num_keys)
@@ -390,35 +443,40 @@ def bake_anim(frame_start=0, frame_end=10, only_selected=False, bake_bones=True,
     print("\n")
     
     
-def get_bone_keyframes_list(pb, act):
+def get_bone_keyframes_list(pb, act, all_rot_modes=False, bonename=''):
     # return a list containing all keyframes frames of the given pose bone
+    
     key_list = []
-
+    if pb: bonename = pb.name
+    
     # loc    
     for i in range(0,3):                            
-        fc = act.fcurves.find('pose.bones["'+pb.name+'"].location', index=i)
+        fc = get_action_fcurves(act, as_list=False).find('pose.bones["'+bonename+'"].location', index=i)
         if fc:                                    
             for k in fc.keyframe_points:
                 if not k.co[0] in key_list:
                     key_list.append(k.co[0])
               
     # rot
-    _range = 3
-    rot_path = 'rotation_euler'
-    if pb.rotation_mode == 'QUATERNION':
-        _range = 4
-        rot_path = 'rotation_quaternion'
-    for i in range(0,_range):# rot                                
-        fc = act.fcurves.find('pose.bones["'+pb.name+'"].'+rot_path, index=i)
-        if fc:                                    
-            for k in fc.keyframe_points:
-                if not k.co[0] in key_list:
-                    key_list.append(k.co[0])
-                    
+    rot_modes = []
+    if all_rot_modes:
+        rot_modes = ['rotation_euler', 'rotation_quaternion']
+    else:
+        rot_path = 'rotation_quaternion' if pb.rotation_mode == 'QUATERNION' else 'rotation_euler'
+        rot_modes.append(rot_path)
+    
+    for rotmode in rot_modes:
+        _range = 3 if rotmode == 'rotation_euler' else 4
+        for i in range(0, _range):
+            fc = get_action_fcurves(act, as_list=False).find('pose.bones["'+bonename+'"].'+rotmode, index=i)
+            if fc:                                    
+                for k in fc.keyframe_points:
+                    if not k.co[0] in key_list:
+                        key_list.append(k.co[0])
         
     # scale
     for i in range(0,3):                            
-        fc = act.fcurves.find('pose.bones["'+pb.name+'"].scale', index=i)
+        fc = get_action_fcurves(act, as_list=False).find('pose.bones["'+bonename+'"].scale', index=i)
         if fc:                                    
             for k in fc.keyframe_points:
                 if not k.co[0] in key_list:
@@ -428,7 +486,7 @@ def get_bone_keyframes_list(pb, act):
     
     
 def copy_shapekeys_tracks(obj1, obj2):
-    # copy the NLA shape keys tracks from one object to another
+    # copy the NLA shape keys tracks from object 1 to object 2
     
     if obj1.data.shape_keys == None:
         return
@@ -442,12 +500,18 @@ def copy_shapekeys_tracks(obj1, obj2):
             
         track2 = obj2.data.shape_keys.animation_data.nla_tracks.get(anim_track.name)
         if track2 == None:
+            #print("Create new track:", anim_track.name)
             track2 = obj2.data.shape_keys.animation_data.nla_tracks.new()
             track2.name = anim_track.name
             
         for strip in anim_track.strips:
             strip2 = track2.strips.get(strip.name)
             if strip2 == None:
-                strip2 = track2.strips.new(strip.name, int(strip.frame_start), strip.action)
+                #print(strip.name)
+                try: strip2 = track2.strips.new(strip.name, int(strip.frame_start), strip.action)
+                except: continue
+                # some tracks may have same names... then the new track was not added, preventing the strip insertion into the first one. 
+                # for now just skip, in practice they're generally just accidental duplicates
+                
                 for setting in ['action_frame_end', 'action_frame_start', 'blend_in', 'blend_out', 'blend_type', 'extrapolation', 'frame_end', 'frame_start', 'mute', 'repeat']:
                     setattr(strip2, setting, getattr(strip, setting))

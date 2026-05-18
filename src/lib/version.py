@@ -1,5 +1,6 @@
 import bpy
-import addon_utils                  
+import addon_utils
+from bpy_extras import anim_utils
 from .. import auto_rig_datas as ard
 from .collections import *
 from .armature import *
@@ -18,6 +19,18 @@ class ARP_blender_version:
 blender_version = ARP_blender_version()
 
 
+def is_pbone_selected(pb):
+    if bpy.app.version >= (5,0,0):
+        return pb.select
+    else: return pb.bone.select
+        
+
+def select_pb_db(pbone, state=True):
+    if bpy.app.version >= (5,0,0):
+        pbone.select = state
+    else: pbone.bone.select = state
+        
+
 def is_proxy(obj):
     # proxy atttribute removed in Blender 3.3
     if 'proxy' in dir(obj):
@@ -27,12 +40,20 @@ def is_proxy(obj):
 
 
 def get_autorigpro_version():
-    addons = addon_utils.modules()[:]
+
+    addons = None
+    if bpy.app.version >= (4,2,0):
+        addons = addon_utils.modules()
+    else:
+        addons = addon_utils.modules()[:]
     
     for addon in addons:    
-        if addon.bl_info['name'].startswith('Auto-Rig Pro'):
-            print(addon)
-            print()
+        addon_name = addon.__name__ if bpy.app.version >= (4,2,0) else addon.bl_info['name']   
+        arp_name = 'bl_ext.user_default.auto_rig_pro' if bpy.app.version >= (4,2,0) else 'Auto-Rig Pro'
+        quickr_name = '_quick_rig' if bpy.app.version >= (4,2,0) else 'Quick Rig' 
+        if addon_name.startswith(arp_name) and not quickr_name in addon_name:
+            #print(addon)
+            #print()
             ver_list = addon.bl_info.get('version')
             ver_string = str(ver_list[0]) + str(ver_list[1]) + str(ver_list[2])
             ver_int = int(ver_string)
@@ -62,7 +83,7 @@ def convert_drivers_cs_to_xyz(armature):
                 
     # tag in prop
     armature.data["arp_updated_3.0"] = True
-    print("Converted custom shape scale drivers to xyz")
+    #print("Converted custom shape scale drivers to xyz")
     
  
 def convert_armature_layers_to_collection(armature):
@@ -82,7 +103,7 @@ def convert_armature_layers_to_collection(armature):
     for col_name in col_names:#armature.data.collections_all:
         _col = get_armature_collections(armature).get(col_name)
         if _col == None:# debug...
-            print(" Collec is None, error when removing collection! Exit")
+            #print(" Collec is None, error when removing collection! Exit")
             continue
 
         # remove deprecated bones color groups
@@ -95,11 +116,13 @@ def convert_armature_layers_to_collection(armature):
             _col.name = 'color_'+_col.name
         
     # rename bones collections
-    print('Rename collections...')
+    #print('Rename collections...')
     
     get_armature_collections(armature).update()
     
     for i, _col in enumerate(get_armature_collections(armature)):
+        if _col == None:#Debug, for some reasons Mac throws a None collection when appending the Bird armature
+            continue
         if _col.name.startswith('Layer '):
             lidx = int(_col.name.split(' ')[1])-1
             
@@ -134,7 +157,7 @@ def convert_armature_layers_to_collection(armature):
     for col_name in ard.layer_col_map:
         if col_name[0].isupper():# only main collections with capital letters                
             if get_armature_collections(armature).get(col_name) == None:
-                print('Create collection', col_name)
+                #print('Create collection', col_name)
                 armature.data.collections.new(col_name)
             
     sort_armature_collections(armature)    
@@ -273,7 +296,7 @@ def invert_angle_with_blender_versions(angle=None, bone=False, axis=None):
     if invert:
         angle = -angle
 
-    return angle    
+    return angle
 
           
 def disable_bone_inherit_scale(editbone):
@@ -290,3 +313,84 @@ def enable_bone_inherit_scale(editbone):
         editbone.use_inherit_scale = True
         
         
+def find_fcurve(act, dp, slot_idx=0, slot_name=None, fc_index=0):
+    # find fcurve from action
+    # use slots in Blender 4.4+
+    
+    if bpy.app.version >= (4,4,0):
+        # check for missing slots
+        if len(act.slots) == 0:
+            #print("Warning, this action has not slots:", act.name)
+            if bpy.app.version < (5,0,0):
+                return find_fcurve_legacy(act, dp, fc_index)
+            else:
+                return None
+            
+        # check for missing channel bag
+        cb = None
+        try: cb = anim_utils.action_get_channelbag_for_slot(act, act.slots[slot_idx if slot_name == None else slot_name])
+        except: print('no channel bag found on action', act.name, 'slot', slot_name if slot_name != None else slot_idx)
+        if cb == None:
+            if bpy.app.version < (5,0,0):
+                return find_fcurve_legacy(act, dp, fc_index)
+            else:
+                return None
+        
+        # get fcurve from action slot
+        return cb.fcurves.find(dp, index=fc_index)
+    
+    # fallback
+    return find_fcurve_legacy(act, dp, fc_index)
+    
+    
+def find_fcurve_legacy(act, dp, fc_index):
+    # only Blender < (5,0,0)
+    return act.fcurves.find(data_path=dp, index=fc_index)
+        
+        
+def create_fcurve(act, dp, slot_idx=0, fc_index=0, action_group=''):
+    if bpy.app.version >= (5,0,0):        
+        if len(act.slots) == 0:# buggy action, no slots
+            print("Warning, this action has not slots, cannot create fcurve:", act.name)
+            return None
+        
+        cb = anim_utils.action_ensure_channelbag_for_slot(act, act.slots[slot_idx])
+        return cb.fcurves.new(dp, index=fc_index, group_name=action_group)
+        
+    else:
+        return act.fcurves.new(dp, index=fc_index, action_group=action_group)
+        
+        
+def delete_fcurve(act, fc, slot_idx=0):
+    if bpy.app.version >= (5,0,0):
+        cb = anim_utils.action_ensure_channelbag_for_slot(act, act.slots[slot_idx])
+        cb.fcurves.remove(fc)
+    else:
+        act.fcurves.remove(fc)
+        
+        
+def get_action_fcurves(act, slot_idx=0, as_list=True):
+    if bpy.app.version >= (5,0,0):    
+        if len(act.slots) == 0:# buggy action, no slots
+            print("Warning, this action has not slots, skipped:", act.name)
+            return []
+            
+        cb = anim_utils.action_ensure_channelbag_for_slot(act, act.slots[slot_idx])
+
+        if cb:
+            if as_list:
+                return [_fc for _fc in cb.fcurves if _fc != None]# check for None curve, debug
+            else:
+                return cb.fcurves
+        else:
+            print("No fcurves found in this slot:", slot_idx)
+            return []
+    else:
+        return act.fcurves
+        
+        
+def get_prefs():
+    if bpy.app.version >= (4,2,0):
+        return bpy.context.preferences.addons[__package__[:-8]].preferences
+    else:
+        return bpy.context.preferences.addons[__package__.split('.')[0]].preferences

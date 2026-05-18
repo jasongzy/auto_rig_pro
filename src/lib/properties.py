@@ -15,11 +15,11 @@ def set_prop_setting(node, prop_name, setting, value):
         if setting == 'default':
             ui_data.update(default=value)
         elif setting == 'min':
-            ui_data.update(min=value)
+            ui_data.update(min=value)          
         elif setting == 'max':
-            ui_data.update(max=value)     
+            ui_data.update(max=value)
         elif setting == 'soft_min':
-            ui_data.update(soft_min=value)
+            ui_data.update(soft_min=value)           
         elif setting == 'soft_max':
             ui_data.update(soft_max=value)
         elif setting == 'description':

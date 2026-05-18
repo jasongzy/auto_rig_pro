@@ -17,22 +17,21 @@
 #
 # ***** END GPL LICENCE BLOCK *****
 
-import os, shutil
-    
+
 bl_info = {
     "name": "Auto-Rig Pro",
     "author": "Artell",
-    "version": (3, 70, 36),
-    "blender": (2, 80, 0),
+    "version": (3, 77, 33),
+    "blender": (4, 2, 0),
     "location": "3D View > Properties> Auto-Rig Pro",
     "description": "Automatic rig generation based on reference bones and various tools",
-    "tracker_url": "http://lucky3d.fr/auto-rig-pro/doc/bug_report.html",    
+    "tracker_url": "http://lucky3d.fr/auto-rig-pro/doc/bug_report.html", 
     "doc_url": "http://lucky3d.fr/auto-rig-pro/doc/",
-    "category": "Animation",
+    "category": "Rigging",
     }
-    
 
-import bpy
+
+import bpy, shutil
 from bpy.app.handlers import persistent
 from .src import auto_rig_prefs
 from .src import rig_functions
@@ -48,58 +47,136 @@ from .src import utils
  
 
 # gltf export specials 
+if bpy.app.version >= (4, 4, 0):
+    from .src.lib.animation import get_action_slot_idx
+    
+    
 class glTF2ExportUserExtension:
     
     export_action_only = ''
     
     def __init__(self):
-        self.action = None
+        self.base_action = None
+        self.base_action_slot_idx = 0
+        
 
-    def gather_actions_hook(self, blender_object, params, export_settings):        
+    def gather_actions_hook(self, blender_object, params, export_settings):  
+        # This hook collects exportable baked actions
+        
         # Filter actions
         #   Only filter ARP rigs
         if not 'arp_rig_name' in blender_object:
             return
         
-        act_list = []
-        for act in params.blender_actions:
-            if len(act.keys()):
-                if "arp_baked_action" in act.keys(): 
-                    if self.export_action_only == 'all_actions':
-                        act_list.append(act)  
-                    elif self.export_action_only == act.name:
-                        act_list.append(act)
+        # convert string list with fancy separators to list
+        export_actions_names = []
+        sep = '|%%|'
+        print('export_action_only', self.export_action_only)
+        if sep in self.export_action_only:
+            for actname in self.export_action_only.split(sep):
+                export_actions_names.append(actname)
+        
+        if len(export_actions_names):
+            print('Actions:', export_actions_names)
+        
+        # collection actions
+        act_list = []       
+
+        if bpy.app.version >= (4, 4, 0):
+            # With version 4.4.0 and higher, params is an object that contains all needed data
+            for action_id in list(params.actions.keys()):
+                for act_id, act in enumerate(params.actions[action_id][:]):
+                    if "arp_baked_action" in act.action.keys():
+                        if self.export_action_only == 'all_actions':
+                            pass  # Do nothing, all actions are exported
+                        elif len(export_actions_names) == 0 and self.export_action_only == params.actions[action_id][act_id].action.name:# single action
+                            pass
+                        elif len(export_actions_names) and params.actions[action_id][act_id].action.name in export_actions_names:# multiple actions
+                            pass  # Do nothing, this action is exported
+                        else:
+                            # We are going to remove this action from the list
+                            params.actions[action_id].remove(act)
+                    else:
+                        params.actions[action_id].remove(act)
+        else:
+            # With version previous to 4.4.0, params has 3 fields: blender_actions, blender_tracks, action_on_type                       
+            for act in params.blender_actions:
+                if len(act.keys()):
+                    if "arp_baked_action" in act.keys(): 
+                        if self.export_action_only == 'all_actions':# all
+                            act_list.append(act)  
+                        elif self.export_action_only == act.name:# single action export
+                            act_list.append(act)
+                        elif len(export_actions_names):# actions list export
+                            if act.name in export_actions_names:
+                                act_list.append(act)
    
         params.blender_actions = act_list
         
+        for (k, v) in params.blender_tracks.items():
+            print('k', k)
+            print('v', v)
         params.blender_tracks = {k:v for (k, v) in params.blender_tracks.items() if k in [act.name for act in params.blender_actions]}
         params.action_on_type = {k:v for (k, v) in params.action_on_type.items() if k in [act.name for act in params.blender_actions]}
 
+        
     def animation_switch_loop_hook(self, blender_object, post, export_settings):
-
-        # Before looping on actions to export
-        # Store used action of original rig
+        # This hook ensures that the original rig active action is conserved after exporting, since it is switched during the export
+        
+        # Store active action of original rig before looping through actions        
         if 'arp_rig_name' in blender_object and post is False:
             original_rig = bpy.data.objects[blender_object['arp_rig_name']]
             if original_rig.animation_data and original_rig.animation_data.action:
-                self.action = original_rig.animation_data.action
+                # save action
+                self.base_action = original_rig.animation_data.action
+                
+                # save slot
+                if bpy.app.version >= (4,4,0):# backward-compatibility
+                    self.base_action_slot_idx = get_action_slot_idx(self.base_action, original_rig.animation_data.action_slot)
 
         # Restore initial action of the original rig
         # After looping on actions to export
         if 'arp_rig_name' in blender_object and post is True:
             original_rig = bpy.data.objects[blender_object['arp_rig_name']]
             if original_rig.animation_data:
-                original_rig.animation_data.action = self.action
+                # assign action
+                original_rig.animation_data.action = self.base_action
+                
+                # assign slot
+                if bpy.app.version >= (4, 4, 0):
+                    original_rig.animation_data.action_slot = self.base_action.slots[self.base_action_slot_idx]
+                    
+            self.base_action = None
+            self.base_action_slot_idx = 0
+            
+    
+    def post_animation_switch_hook(self, *args, **kwargs):
+        # This hook is necessary for shape keys export
+        # (if shape keys are driven by bones, then contained in the action data)
+        # When switching the exported rig action, make sure to also switch the action of the original rig
 
-            self.action = None
+        # the original action name and slot index are now stored in the 'arp_baked_action' property located on the baked action:
+        # ["arp_baked_action"] = action.name+'|||'+str(slot_idx)
+        # to be fetched with:
+        # act_name, slot_idx = blender_action["arp_baked_action"].split('|||')
 
-    def post_animation_switch_hook(self, blender_object, blender_action, track_name, on_type, export_settings):
+        if bpy.app.version >= (4, 4, 0):
+            blender_object, blender_action, slot, track_name, on_type, export_settings = args
+        else:
+            blender_object, blender_action, track_name, on_type, export_settings = args
 
-        # When switching the exported rig, also switch the original rig (same action + "_%temp")
         if 'arp_rig_name' in blender_object:
             original_rig = bpy.data.objects[blender_object['arp_rig_name']]
             if original_rig.animation_data:
-                original_rig.animation_data.action = bpy.data.actions[blender_action.name + "_%temp"]
+                act_name, slot_idx = blender_action["arp_baked_action"].split('|||')
+                
+                # assign action
+                original_rig.animation_data.action = bpy.data.actions[act_name]
+                
+                # assign slot
+                if bpy.app.version >= (4, 4, 0):
+                    original_rig.animation_data.action_slot = \
+                        original_rig.animation_data.action.slots[int(slot_idx)]
                 
                 
 def menu_func_export(self, context):

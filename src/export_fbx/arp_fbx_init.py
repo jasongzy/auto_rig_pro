@@ -106,7 +106,12 @@ class ARP_OT_export_fbx_wrap(bpy.types.Operator, ExportHelper):
             description="Import vertex color attributes",
             default='SRGB',
             )
-
+    prioritize_active_color: BoolProperty(
+            name="Prioritize Active Color",
+            description="Make sure active color will be exported first. Could be important "
+                        "since some other software can discard other color attributes besides the first one",
+            default=False,
+            )
     object_types: EnumProperty(
             name="Object Types",
             options={'ENUM_FLAG'},
@@ -242,6 +247,12 @@ class ARP_OT_export_fbx_wrap(bpy.types.Operator, ExportHelper):
             description="Always add a keyframe at start and end of actions for animated channels",
             default=True,
             )
+    bake_anim_force_startend_keying_sk: BoolProperty(
+            name="Force Start/End Keying for Shape Keys",
+            description="Always add a keyframe at start and end of actions for animated channels",
+            default=False,
+            )
+            
     bake_anim_step: FloatProperty(
             name="Sampling Rate",
             description="How often to evaluate animated values (in frames)",
@@ -318,11 +329,17 @@ class ARP_OT_export_fbx_wrap(bpy.types.Operator, ExportHelper):
 
 def register():
     if bpy.app.version >= (4,1,0):
-        from bpy.utils import register_class     
-        register_class(ARP_OT_export_fbx_wrap)
+        from bpy.utils import register_class  
+        try:
+            register_class(ARP_OT_export_fbx_wrap)
+        except:
+            pass
 
 
 def unregister():
     if bpy.app.version >= (4,1,0):
         from bpy.utils import unregister_class  
-        unregister_class(ARP_OT_export_fbx_wrap)
+        try:
+            unregister_class(ARP_OT_export_fbx_wrap)
+        except:
+            pass
